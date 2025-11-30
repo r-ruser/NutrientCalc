@@ -33,6 +33,7 @@ install.packages("C:/path/to/NutrientCalc", repos = NULL, type = "source")
 ## 使用示例
 
 ```r
+remotes::install_github("r-ruser/NutrientCalc")
 library(NutrientCalc)
 
 # 1. 计算营养素
