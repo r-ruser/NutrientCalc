@@ -8,19 +8,52 @@ df <- readxl::read_excel(xlsx_path, sheet = 1)
 
 head(df)
 
+# ---- robust preprocessing for FFQ-coded input ----
+# Keep original data frame structure, but force all intake-related fields
+# used in arithmetic to numeric. This avoids Excel-imported character columns
+# such as "5_8；B4.02Times；" causing multiplication errors.
 df[is.na(df)] <- 0
 
-freq_cols <- grep("_Frequency$", names(df), value = TRUE)
+freq_cols   <- grep("Frequency", names(df), value = TRUE)
+times_cols  <- grep("Times", names(df), value = TRUE)
+amount_cols <- grep("Amount", names(df), value = TRUE)
 
-df[freq_cols] <- lapply(df[freq_cols], function(x) {
-  dplyr::recode(x,
-                `0` = 0,
-                `1` = 0,
-                `2` = 12/365,
-                `3` = 7/365,
-                `4` = 1,
-                .default = x)
-})
+num_safe <- function(x) {
+  x_chr <- trimws(as.character(x))
+  x_chr[x_chr %in% c("", "NA", "N/A", "NULL", "NaN", "<NA>")] <- "0"
+  x_chr <- gsub("，", ".", x_chr, fixed = TRUE)
+  x_chr <- gsub(",", ".", x_chr, fixed = TRUE)
+  out <- suppressWarnings(as.numeric(x_chr))
+  out[is.na(out)] <- 0
+  out
+}
+
+freq_recode <- function(x) {
+  x_chr <- trimws(as.character(x))
+  x_chr[x_chr %in% c("", "NA", "N/A", "NULL", "NaN", "<NA>")] <- "0"
+  out <- dplyr::recode(
+    x_chr,
+    `0` = 0,
+    `1` = 0,
+    `2` = 12/365,
+    `3` = 7/365,
+    `4` = 1,
+    .default = suppressWarnings(as.numeric(x_chr)),
+    .missing = 0
+  )
+  out[is.na(out)] <- 0
+  as.numeric(out)
+}
+
+if (length(freq_cols) > 0) {
+  df[freq_cols] <- lapply(df[freq_cols], freq_recode)
+}
+if (length(times_cols) > 0) {
+  df[times_cols] <- lapply(df[times_cols], num_safe)
+}
+if (length(amount_cols) > 0) {
+  df[amount_cols] <- lapply(df[amount_cols], num_safe)
+}
 
 #第一部分计算吃了多少
 df$rice = df$'A1_White_Rice_Dry_Breakfast_Frequency'*df$'4_2；A1.02Times'*df$'4_3；A1.03Amount'+
@@ -1484,5 +1517,1144 @@ df$Mn = (0.58*df$rice+0.2*df$White_Congee+0.08*df$Rice_Noodles+0.15*df$Vermicell
          +(0.4*0.91*0.03*df$Pork+0.03*0.35*df$White_Steamed_Bread+0.15*0.89*0.19*df$Chinese_Cabbage)*df$Dumplings_Pork_Cabbage
          +(0.3*0.91*0.03*df$Pork+0.03*0.35*df$White_Steamed_Bread+0.1*0.9*0.21*df$Chinese_Chives+0.1*0.59*0.22*df$Sea_Shrimp)*df$Dumplings_Three_Fresh
 )
+
+  # Added nutrients from China Food Composition Tables (amino acids, fatty acids, purines)
+  # Rules: Tr treated as 0; multiple matched source rows averaged; unmatched foods/components set to 0.
+  calc_sparse_nutrient <- function(coef_map) {
+    total <- rep(0, nrow(df))
+    if (length(coef_map) > 0) {
+      for (food in names(coef_map)) {
+        if (food %in% names(df)) total <- total + unname(coef_map[[food]]) * df[[food]]
+      }
+    }
+    getv <- function(x) if (x %in% names(coef_map)) unname(coef_map[[x]]) else 0
+    total <- total + (0.45 * getv("White_Steamed_Bread") + 0.35 * getv("Pork") + 0.05 * getv("Scallion")) * df$Pork_Buns
+    total <- total + (0.45 * getv("Pork") + 0.35 * getv("White_Steamed_Bread") + 0.05 * getv("Scallion") + 0.08 * getv("Shiitake_Mushroom")) * df$Dumplings_Pork_Mushroom
+    total <- total + (0.4 * getv("Pork") + 0.35 * getv("White_Steamed_Bread") + 0.15 * getv("Chinese_Chives")) * df$Dumplings_Pork_Chive
+    total <- total + (0.4 * getv("Pork") + 0.35 * getv("White_Steamed_Bread") + 0.15 * getv("Chinese_Cabbage")) * df$Dumplings_Pork_Cabbage
+    total <- total + (0.3 * getv("Pork") + 0.35 * getv("White_Steamed_Bread") + 0.1 * getv("Chinese_Chives") + 0.1 * getv("Sea_Shrimp")) * df$Dumplings_Three_Fresh
+    total
+  }
+
+  df$isoleucine <- calc_sparse_nutrient(
+c(rice = 100, White_Congee = 50, Rice_Noodles = 289, Noodles = 177, Macaroni_Pasta = 426, Oatmeal = 440,
+  Deep_fried_dough_sticks = 247, Fish_balls = 440, Cuttlefish_Balls = 500, Sweet_Potato = 42.14, Taro = 75,
+  Salted_Duck_Egg = 588, Century_Egg = 556.2, Pork_Floss = 1052, Ham_Sausage = 641.25, Chicken_Egg = 564.63,
+  Duck_Egg = 507.21, Pork = 575.12, Pork_Chops = 427.455, Beef = 850, Mutton = 835, Rabbit_Meat = 889,
+  Chicken = 545.58, Duck = 457.64, Pork_Tripe = 487.68, Pork_Liver = 640, Pork_Trotters = 228,
+  Chicken_Gizzard = 865, Chicken_Wings = 489.9, Grass_Carp = 435.58, Silver_Carp = 445.91,
+  Crucian_Carp = 416.34, Perch = 522.58, Yellow_Croaker = 461.12, Sardine = 408.7, Black_Carp = 569.52,
+  Mackerel = 307.23, Spanish_Mackerel = 691.2, Pomfret = 583.1, Hairtail = 566.96, Mandarin_Fish = 525.21,
+  Dike_Fish = 451.2, Bream = 499.73, Rice_Eel = 515.23, Squid = 687.73, Crab = 912, Sea_Shrimp = 446.63,
+  Clam = 158.34, Oyster = 222, Razor_Clam = 145.92, Mussel = 213.15, Jellyfish = 145,
+  Fresh_Milk_Boxed_Milk = 130, Milk_Powder = 1046, Yogurt = 122, Soy_Milk = 61,
+  Breakfast_Milk_Breakfast_Drink = 120, Peanuts = 162.71, Other_Nuts = 410.880134, Soybeans = 1853,
+  Mung_Beans = 976, Tofu = 265, Dried_Tofu = 860, Tofu_Skin = 2140, Tofu_Strips = 822, Fried_Tofu = 793,
+  Soybean_Sprouts = 191, Mung_Bean_Sprouts = 85, Snow_Peas = 58.08, White_Radish_Leaves = 144,
+  Carrot_Leaves = 129, Carrot = 36.48, White_Radish = 19.95, Lotus_Root = 38.72, Bamboo_Shoots = 49.14,
+  Bokchoy = 47.94, Chinese_Cabbage = 32.04, Onion = 28.8, Garlic = 90.1, Amaranth = 115.44,
+  Chinese_Chives = 79.2, Water_Spinach = 45, Spinach = 89, Mustard_Greens = 81.78, Shepherds_Purse = 101.2,
+  Rapeseed = 52.8, Winter_Melon = 9.6, Cucumber = 17.48, Luffa = 22.41, Bitter_Melon = 23.49,
+  Pumpkin = 16.15, Tomato = 13, Chili_Pepper = 32, Eggplant = 35.625, Green_Pepper = 36.4,
+  Wood_Ear_Mushroom = 63, Enoki_Mushroom = 69, Mushroom = 98.01, Shiitake_Mushroom = 212, Kelp = 64,
+  Apple = 10.2, Banana = 29.4, Orange = 12.58, Pomelo = 13.11, Pear = 4.92, Peach = 24.03, Mango = 9.6,
+  Pineapple = 10.2, Muskmelon = 7.8, Grape = 6.88, Persimmon = 12.88, Longan = 13, Lychee = 16.06,
+  Loquat = 23.56, Watermelon = 10.62, Strawberry = 23.28, Kiwi = 21.58, Water_Chestnut = 17.94,
+  Dried_Shiitake = 1574.15, Dried_Kelp = 62.72, Dried_Seaweed = 683, Dried_Scallop = 1327, Dried_Fish = 1761)
+  )
+
+  df$leucine <- calc_sparse_nutrient(
+c(rice = 200, White_Congee = 110, Rice_Noodles = 568, Noodles = 415, Macaroni_Pasta = 894, Oatmeal = 872,
+  Deep_fried_dough_sticks = 523, Fish_balls = 830, Cuttlefish_Balls = 930, Sweet_Potato = 68.8, Taro = 171,
+  Salted_Duck_Egg = 882, Century_Egg = 998.1, Pork_Floss = 1970, Ham_Sausage = 1088, Chicken_Egg = 910.89,
+  Duck_Egg = 923.94, Pork = 1111.11, Pork_Chops = 819.03, Beef = 1563, Mutton = 1541, Rabbit_Meat = 1571,
+  Chicken = 1020.6, Duck = 844.56, Pork_Tripe = 961.92, Pork_Liver = 1560, Pork_Trotters = 517.2,
+  Chicken_Gizzard = 1452, Chicken_Wings = 924.6, Chicken_Feet = 735.6, Grass_Carp = 759.8,
+  Silver_Carp = 758.23, Crucian_Carp = 720.36, Perch = 914.66, Yellow_Croaker = 858.24, Sardine = 716.9,
+  Black_Carp = 967.05, Mackerel = 537.04, Spanish_Mackerel = 1268.64, Pomfret = 954.8, Hairtail = 997.88,
+  Mandarin_Fish = 963.19, Dike_Fish = 763.52, Bream = 959.34, Rice_Eel = 885.74, Squid = 1249.36,
+  Crab = 1620, Sea_Shrimp = 856.09, Clam = 241.02, Oyster = 357, Razor_Clam = 254.79, Mussel = 330.26,
+  Jellyfish = 213.5, Fresh_Milk_Boxed_Milk = 247, Milk_Powder = 1543, Yogurt = 225, Soy_Milk = 109,
+  Breakfast_Milk_Breakfast_Drink = 221, Peanuts = 367.29, Other_Nuts = 744.567188, Soybeans = 2819,
+  Mung_Beans = 1761, Tofu = 511, Dried_Tofu = 1339, Tofu_Skin = 4020, Tofu_Strips = 1331, Fried_Tofu = 1359,
+  Soybean_Sprouts = 248, Mung_Bean_Sprouts = 111, Snow_Peas = 128.48, White_Radish_Leaves = 250,
+  Carrot_Leaves = 202, Carrot = 48, White_Radish = 25.65, Lotus_Root = 57.2, Bamboo_Shoots = 79.38,
+  Bokchoy = 91.18, Chinese_Cabbage = 48.95, Onion = 44.1, Garlic = 157.25, Amaranth = 194.62,
+  Chinese_Chives = 142.2, Water_Spinach = 141, Spinach = 161.98, Mustard_Greens = 147.58,
+  Shepherds_Purse = 176.88, Rapeseed = 89.28, Winter_Melon = 13.6, Cucumber = 30.36, Luffa = 38.18,
+  Bitter_Melon = 40.5, Pumpkin = 17.85, Tomato = 20, Chili_Pepper = 48.8, Eggplant = 42.275,
+  Green_Pepper = 55.51, Enoki_Mushroom = 92, Mushroom = 112.86, Shiitake_Mushroom = 117, Kelp = 79,
+  Apple = 12.75, Banana = 60.2, Orange = 19.24, Pomelo = 20.01, Pear = 5.74, Peach = 52.51, Mango = 15.6,
+  Pineapple = 15.64, Muskmelon = 13.26, Grape = 9.46, Persimmon = 19.32, Longan = 22.5, Lychee = 24.82,
+  Loquat = 28.52, Watermelon = 10.62, Strawberry = 43.65, Kiwi = 24.9, Water_Chestnut = 45.24,
+  Dried_Shiitake = 1086.8, Dried_Kelp = 77.42, Dried_Seaweed = 1848, Dried_Scallop = 4179, Dried_Fish = 3872)
+  )
+
+  df$lysine <- calc_sparse_nutrient(
+c(rice = 100, White_Congee = 50, Rice_Noodles = 264, Noodles = 142, Macaroni_Pasta = 264, Oatmeal = 501,
+  Deep_fried_dough_sticks = 114, Fish_balls = 930, Cuttlefish_Balls = 1010, Sweet_Potato = 68.8, Taro = 85,
+  Salted_Duck_Egg = 697.2, Century_Egg = 733.5, Pork_Floss = 1952, Ham_Sausage = 1087.5,
+  Chicken_Egg = 736.02, Duck_Egg = 751.68, Pork = 1203.02, Pork_Chops = 892.86, Beef = 1722, Mutton = 1713,
+  Rabbit_Meat = 1603, Chicken = 1108.8, Duck = 876.52, Pork_Tripe = 830.4, Pork_Liver = 1290,
+  Pork_Trotters = 564, Chicken_Gizzard = 1351, Chicken_Wings = 966, Chicken_Feet = 716.4,
+  Grass_Carp = 854.92, Silver_Carp = 929.03, Crucian_Carp = 798.12, Perch = 876.96, Yellow_Croaker = 962.24,
+  Sardine = 737, Black_Carp = 1147.86, Mackerel = 606.13, Spanish_Mackerel = 1238.76, Pomfret = 1054.9,
+  Hairtail = 1076.92, Mandarin_Fish = 1125.45, Dike_Fish = 1007.36, Bream = 1094.45, Rice_Eel = 985.57,
+  Squid = 1176.61, Crab = 1760, Sea_Shrimp = 859.63, Clam = 376.74, Oyster = 366, Razor_Clam = 241.11,
+  Mussel = 419.93, Jellyfish = 198, Fresh_Milk_Boxed_Milk = 214, Milk_Powder = 1523, Yogurt = 185,
+  Soy_Milk = 106, Breakfast_Milk_Breakfast_Drink = 186, Peanuts = 240.09, Other_Nuts = 373.614509,
+  Soybeans = 2237, Mung_Beans = 1626, Tofu = 394, Dried_Tofu = 999, Tofu_Skin = 3220, Tofu_Strips = 981,
+  Fried_Tofu = 956, Soybean_Sprouts = 189, Mung_Bean_Sprouts = 85, Snow_Peas = 33.44,
+  White_Radish_Leaves = 189, Carrot_Leaves = 148, Carrot = 45.12, White_Radish = 29.45, Lotus_Root = 52.8,
+  Bamboo_Shoots = 71.19, Bokchoy = 74.26, Chinese_Cabbage = 45.39, Onion = 40.5, Garlic = 164.9,
+  Amaranth = 142.82, Chinese_Chives = 108, Water_Spinach = 95, Spinach = 130.83, Mustard_Greens = 111.86,
+  Shepherds_Purse = 102.08, Rapeseed = 85.44, Winter_Melon = 8.8, Cucumber = 30.36, Luffa = 39.01,
+  Bitter_Melon = 56.7, Pumpkin = 21.25, Tomato = 23, Chili_Pepper = 50.4, Eggplant = 54.15,
+  Green_Pepper = 57.33, Enoki_Mushroom = 71, Mushroom = 94.05, Shiitake_Mushroom = 68, Kelp = 64,
+  Apple = 12.75, Banana = 42, Orange = 20.72, Pomelo = 20.7, Pear = 4.92, Peach = 10.68, Mango = 21.6,
+  Pineapple = 1.36, Muskmelon = 11.7, Grape = 11.18, Persimmon = 18.4, Longan = 18.5, Lychee = 24.09,
+  Loquat = 27.28, Watermelon = 10.62, Strawberry = 30.07, Kiwi = 13.28, Water_Chestnut = 42.12,
+  Dried_Shiitake = 837.9, Dried_Kelp = 62.72, Dried_Seaweed = 1086, Dried_Scallop = 4502, Dried_Fish = 3684)
+  )
+
+  df$SAA <- calc_sparse_nutrient(
+c(rice = 120, White_Congee = 70, Rice_Noodles = 178, Noodles = 300, Macaroni_Pasta = 373, Oatmeal = 386,
+  Deep_fried_dough_sticks = 269, Fish_balls = 460, Cuttlefish_Balls = 530, Sweet_Potato = 38.7, Taro = 58,
+  Salted_Duck_Egg = 596.4, Century_Egg = 648, Pork_Floss = 806, Ham_Sausage = 460, Chicken_Egg = 718.62,
+  Duck_Egg = 662.07, Pork = 503.23, Pork_Chops = 397.785, Beef = 514, Mutton = 611, Rabbit_Meat = 847,
+  Chicken = 288.54, Duck = 359.72, Pork_Tripe = 395.52, Pork_Liver = 680, Pork_Trotters = 231.6,
+  Chicken_Gizzard = 212, Chicken_Wings = 476.1, Chicken_Feet = 228.6, Grass_Carp = 360.18,
+  Silver_Carp = 440.42, Crucian_Carp = 409.32, Yellow_Croaker = 427.52, Sardine = 368.5, Black_Carp = 535.5,
+  Mackerel = 348.39, Spanish_Mackerel = 370.44, Pomfret = 499.8, Hairtail = 446.88, Mandarin_Fish = 373.32,
+  Dike_Fish = 197.76, Bream = 369.93, Rice_Eel = 491.11, Squid = 146.47, Crab = 853, Sea_Shrimp = 417.72,
+  Clam = 113.1, Oyster = 204, Razor_Clam = 101.46, Mussel = 270.48, Jellyfish = 138.5,
+  Fresh_Milk_Boxed_Milk = 80, Milk_Powder = 495, Yogurt = 39, Soy_Milk = 98,
+  Breakfast_Milk_Breakfast_Drink = 70, Peanuts = 50.35, Other_Nuts = 298.231473, Soybeans = 902,
+  Mung_Beans = 489, Tofu = 180, Dried_Tofu = 296, Tofu_Skin = 1430, Tofu_Strips = 350, Fried_Tofu = 381,
+  Soybean_Sprouts = 109, Mung_Bean_Sprouts = 57, White_Radish_Leaves = 90, Carrot_Leaves = 56,
+  Carrot = 39.36, White_Radish = 21.85, Lotus_Root = 62.48, Bamboo_Shoots = 34.65, Bokchoy = 21.62,
+  Chinese_Cabbage = 28.48, Onion = 26.1, Garlic = 46.75, Amaranth = 29.6, Chinese_Chives = 43.2,
+  Water_Spinach = 17, Spinach = 32.04, Mustard_Greens = 50.76, Shepherds_Purse = 56.32, Rapeseed = 17.28,
+  Winter_Melon = 5.6, Cucumber = 22.08, Luffa = 7.47, Bitter_Melon = 7.29, Pumpkin = 10.2, Tomato = 17,
+  Chili_Pepper = 61.6, Eggplant = 22.8, Green_Pepper = 70.07, Wood_Ear_Mushroom = 29, Enoki_Mushroom = 54,
+  Mushroom = 74.25, Kelp = 49, Apple = 14.45, Banana = 25.9, Orange = 10.36, Pomelo = 31.05, Pear = 9.84,
+  Peach = 8.9, Muskmelon = 5.46, Grape = 12.9, Persimmon = 5.52, Longan = 6, Lychee = 3.65, Loquat = 4.96,
+  Watermelon = 6.49, Strawberry = 16.49, Kiwi = 9.96, Water_Chestnut = 21.84, Dried_Shiitake = 532,
+  Dried_Kelp = 48.02, Dried_Seaweed = 785, Dried_Scallop = 1280, Dried_Fish = 1518)
+  )
+
+  df$methionine <- calc_sparse_nutrient(
+c(rice = 70, White_Congee = 40, Rice_Noodles = 178, Noodles = 100, Macaroni_Pasta = 173, Oatmeal = 162,
+  Deep_fried_dough_sticks = 99, Fish_balls = 350, Cuttlefish_Balls = 380, Sweet_Potato = 17.2, Taro = 19,
+  Potato = 22.56, Salted_Duck_Egg = 445.2, Century_Egg = 438.3, Pork_Floss = 423, Ham_Sausage = 282.666667,
+  Chicken_Egg = 284.49, Duck_Egg = 435, Pork = 315.77, Pork_Chops = 250.815, Beef = 248, Mutton = 389,
+  Rabbit_Meat = 526, Chicken = 269.64, Duck = 216.92, Pork_Tripe = 219.84, Pork_Liver = 390,
+  Pork_Trotters = 64.2, Chicken_Wings = 351.9, Chicken_Feet = 115.8, Grass_Carp = 239.54,
+  Silver_Carp = 300.73, Crucian_Carp = 278.64, Yellow_Croaker = 301.44, Sardine = 294.8, Black_Carp = 343.98,
+  Mackerel = 204.82, Spanish_Mackerel = 275.4, Pomfret = 352.8, Hairtail = 297.16, Mandarin_Fish = 373.32,
+  Dike_Fish = 197.76, Bream = 260.78, Rice_Eel = 318.92, Crab = 178, Sea_Shrimp = 304.44, Clam = 83.46,
+  Oyster = 148, Razor_Clam = 101.46, Mussel = 123.48, Jellyfish = 63.5, Fresh_Milk_Boxed_Milk = 63,
+  Milk_Powder = 189, Yogurt = 11, Soy_Milk = 39, Breakfast_Milk_Breakfast_Drink = 49, Other_Nuts = 170.925,
+  Soybeans = 385, Mung_Beans = 269, Tofu = 87, Dried_Tofu = 162, Tofu_Skin = 750, Tofu_Strips = 120,
+  Fried_Tofu = 163, Soybean_Sprouts = 36, Mung_Bean_Sprouts = 33, White_Radish_Leaves = 38,
+  Carrot_Leaves = 23, Carrot = 18.24, White_Radish = 10.45, Lotus_Root = 34.32, Bamboo_Shoots = 16.38,
+  Bokchoy = 8.46, Chinese_Cabbage = 10.68, Onion = 26.1, Garlic = 46.75, Chinese_Chives = 18.9,
+  Water_Spinach = 17, Spinach = 16.02, Mustard_Greens = 26.32, Shepherds_Purse = 35.2, Rapeseed = 17.28,
+  Winter_Melon = 2.4, Cucumber = 10.12, Luffa = 7.47, Bitter_Melon = 7.29, Pumpkin = 4.25, Tomato = 6,
+  Chili_Pepper = 32, Eggplant = 6.65, Green_Pepper = 36.4, Enoki_Mushroom = 32, Mushroom = 53.46, Kelp = 49,
+  Apple = 4.25, Banana = 25.9, Orange = 4.44, Pomelo = 31.05, Pear = 5.74, Peach = 0.89, Muskmelon = 1.56,
+  Grape = 6.02, Persimmon = 1.84, Longan = 6, Lychee = 3.65, Loquat = 2.48, Watermelon = 2.36,
+  Strawberry = 7.76, Kiwi = 4.98, Water_Chestnut = 11.7, Dried_Shiitake = 234.65, Dried_Kelp = 48.02,
+  Dried_Seaweed = 659, Dried_Scallop = 1280, Dried_Fish = 1087)
+  )
+
+  df$cystine <- calc_sparse_nutrient(
+c(rice = 50, White_Congee = 30, Noodles = 200, Macaroni_Pasta = 200, Oatmeal = 224,
+  Deep_fried_dough_sticks = 170, Fish_balls = 110, Cuttlefish_Balls = 150, Sweet_Potato = 21.5, Taro = 39,
+  Salted_Duck_Egg = 151.2, Century_Egg = 209.7, Pork_Floss = 383, Ham_Sausage = 177.333333,
+  Chicken_Egg = 434.13, Duck_Egg = 227.07, Pork = 188.37, Pork_Chops = 146.97, Beef = 265, Mutton = 257,
+  Rabbit_Meat = 321, Chicken = 183.33, Duck = 142.8, Pork_Tripe = 175.68, Pork_Liver = 290,
+  Pork_Trotters = 167.4, Chicken_Gizzard = 212, Chicken_Wings = 124.2, Chicken_Feet = 112.8,
+  Grass_Carp = 120.64, Silver_Carp = 139.69, Crucian_Carp = 130.68, Yellow_Croaker = 126.08, Sardine = 73.7,
+  Black_Carp = 191.52, Mackerel = 143.57, Spanish_Mackerel = 190.08, Pomfret = 147, Hairtail = 149.72,
+  Bream = 109.15, Rice_Eel = 172.19, Squid = 146.47, Crab = 675, Sea_Shrimp = 113.28, Clam = 29.64,
+  Oyster = 56, Mussel = 147, Jellyfish = 75, Fresh_Milk_Boxed_Milk = 17, Milk_Powder = 306, Yogurt = 36,
+  Soy_Milk = 59, Breakfast_Milk_Breakfast_Drink = 21, Peanuts = 50.35, Other_Nuts = 151.72433,
+  Soybeans = 517, Mung_Beans = 220, Tofu = 93, Dried_Tofu = 134, Tofu_Skin = 680, Tofu_Strips = 230,
+  Fried_Tofu = 218, Soybean_Sprouts = 73, Mung_Bean_Sprouts = 24, White_Radish_Leaves = 52,
+  Carrot_Leaves = 33, Carrot = 21.12, White_Radish = 11.4, Lotus_Root = 28.16, Bamboo_Shoots = 18.27,
+  Bokchoy = 13.16, Chinese_Cabbage = 17.8, Amaranth = 29.6, Chinese_Chives = 24.3, Spinach = 16.02,
+  Mustard_Greens = 24.44, Shepherds_Purse = 21.12, Winter_Melon = 3.2, Cucumber = 11.96, Pumpkin = 5.95,
+  Tomato = 11, Chili_Pepper = 29.6, Eggplant = 16.15, Green_Pepper = 33.67, Wood_Ear_Mushroom = 29,
+  Enoki_Mushroom = 22, Mushroom = 20.79, Apple = 10.2, Orange = 5.92, Pear = 4.1, Peach = 8.01,
+  Muskmelon = 3.9, Grape = 6.88, Persimmon = 3.68, Loquat = 2.48, Watermelon = 4.13, Strawberry = 8.73,
+  Kiwi = 4.98, Water_Chestnut = 10.14, Dried_Shiitake = 297.35, Dried_Seaweed = 126, Dried_Fish = 431)
+  )
+
+  df$AAA <- calc_sparse_nutrient(
+c(rice = 260, White_Congee = 140, Rice_Noodles = 617, Noodles = 437, Macaroni_Pasta = 923, Oatmeal = 897,
+  Deep_fried_dough_sticks = 617, Fish_balls = 810, Cuttlefish_Balls = 910, Sweet_Potato = 97.18, Taro = 205,
+  Salted_Duck_Egg = 1125.6, Century_Egg = 1264.5, Pork_Floss = 2938, Ham_Sausage = 1154,
+  Chicken_Egg = 997.02, Duck_Egg = 1114.47, Pork = 1098.37, Pork_Chops = 788.67, Beef = 1460, Mutton = 1380,
+  Rabbit_Meat = 1681, Chicken = 853.02, Duck = 840.48, Pork_Tripe = 880.32, Pork_Liver = 1540,
+  Pork_Trotters = 486.6, Chicken_Gizzard = 1288, Chicken_Wings = 883.2, Chicken_Feet = 555.6,
+  Grass_Carp = 687.3, Silver_Carp = 757.01, Crucian_Carp = 677.7, Perch = 819.54, Yellow_Croaker = 820.48,
+  Sardine = 737, Black_Carp = 915.39, Mackerel = 523.32, Spanish_Mackerel = 1194.84, Pomfret = 848.4,
+  Hairtail = 959.12, Mandarin_Fish = 1030.9, Dike_Fish = 673.92, Bream = 853.14, Rice_Eel = 942.69,
+  Squid = 1128.11, Crab = 1878, Sea_Shrimp = 805.94, Clam = 255.45, Oyster = 410, Razor_Clam = 301.53,
+  Mussel = 388.57, Jellyfish = 149.5, Fresh_Milk_Boxed_Milk = 230, Milk_Powder = 1933, Yogurt = 229,
+  Soy_Milk = 169, Breakfast_Milk_Breakfast_Drink = 185, Peanuts = 429.3, Other_Nuts = 885.218304,
+  Soybeans = 3013, Mung_Beans = 2102, Tofu = 576, Dried_Tofu = 1447, Tofu_Skin = 4380, Tofu_Strips = 1424,
+  Fried_Tofu = 1510, Soybean_Sprouts = 286, Mung_Bean_Sprouts = 155, Snow_Peas = 123.2,
+  White_Radish_Leaves = 318, Carrot_Leaves = 276, Carrot = 46.08, White_Radish = 30.4, Lotus_Root = 58.96,
+  Bamboo_Shoots = 244.44, Bokchoy = 90.24, Chinese_Cabbage = 62.3, Onion = 57.6, Garlic = 196.35,
+  Amaranth = 241.98, Chinese_Chives = 135, Water_Spinach = 117, Spinach = 170.88, Mustard_Greens = 121.26,
+  Shepherds_Purse = 188.32, Rapeseed = 95.04, Winter_Melon = 18.4, Cucumber = 31.28, Luffa = 42.33,
+  Bitter_Melon = 81, Pumpkin = 33.15, Tomato = 34, Chili_Pepper = 76.8, Eggplant = 64.125,
+  Green_Pepper = 87.36, Wood_Ear_Mushroom = 90, Enoki_Mushroom = 129, Mushroom = 100.98,
+  Shiitake_Mushroom = 140, Kelp = 77, Apple = 27.2, Banana = 50.4, Orange = 22.94, Pomelo = 40.02,
+  Pear = 11.48, Peach = 38.27, Mango = 20.4, Muskmelon = 15.6, Grape = 20.64, Persimmon = 18.4, Longan = 25,
+  Lychee = 24.09, Loquat = 23.56, Watermelon = 14.16, Strawberry = 37.83, Kiwi = 31.54,
+  Water_Chestnut = 48.36, Dried_Shiitake = 975.65, Dried_Kelp = 75.46, Dried_Seaweed = 1774,
+  Dried_Scallop = 3291, Dried_Fish = 3335)
+  )
+
+  df$phenylalanine <- calc_sparse_nutrient(
+c(rice = 170, White_Congee = 90, Rice_Noodles = 361, Noodles = 274, Macaroni_Pasta = 553, Oatmeal = 615,
+  Deep_fried_dough_sticks = 358, Fish_balls = 460, Cuttlefish_Balls = 480, Sweet_Potato = 61.06, Taro = 108,
+  Salted_Duck_Egg = 638.4, Century_Egg = 712.8, Pork_Floss = 1821, Ham_Sausage = 619.25,
+  Chicken_Egg = 567.24, Duck_Egg = 618.57, Pork = 556.01, Pork_Chops = 403.305, Beef = 789, Mutton = 755,
+  Rabbit_Meat = 885, Chicken = 444.78, Duck = 423.64, Pork_Tripe = 498.24, Pork_Liver = 840,
+  Pork_Trotters = 325.2, Chicken_Gizzard = 724, Chicken_Wings = 476.1, Chicken_Feet = 343.8,
+  Grass_Carp = 386.86, Silver_Carp = 424.56, Crucian_Carp = 380.16, Perch = 444.86, Yellow_Croaker = 432.32,
+  Sardine = 388.6, Black_Carp = 507.78, Mackerel = 272.93, Spanish_Mackerel = 646.56, Pomfret = 450.8,
+  Hairtail = 520.6, Mandarin_Fish = 547.17, Dike_Fish = 359.04, Bream = 473.18, Rice_Eel = 538.01,
+  Squid = 607.22, Crab = 978, Sea_Shrimp = 407.1, Clam = 127.14, Oyster = 203, Razor_Clam = 163.59,
+  Mussel = 188.16, Jellyfish = 91.5, Fresh_Milk_Boxed_Milk = 118, Milk_Powder = 987, Yogurt = 111,
+  Soy_Milk = 92, Breakfast_Milk_Breakfast_Drink = 102, Peanuts = 263.41, Other_Nuts = 532.153125,
+  Soybeans = 1844, Mung_Beans = 1412, Tofu = 335, Dried_Tofu = 862, Tofu_Skin = 2440, Tofu_Strips = 824,
+  Fried_Tofu = 861, Soybean_Sprouts = 191, Mung_Bean_Sprouts = 110, Snow_Peas = 72.16,
+  White_Radish_Leaves = 192, Carrot_Leaves = 169, Carrot = 27.84, White_Radish = 17.1, Lotus_Root = 29.04,
+  Bamboo_Shoots = 49.77, Bokchoy = 51.7, Chinese_Cabbage = 39.16, Onion = 41.4, Garlic = 106.25,
+  Amaranth = 134.68, Chinese_Chives = 84.6, Water_Spinach = 61, Spinach = 96.12, Mustard_Greens = 89.3,
+  Shepherds_Purse = 98.56, Rapeseed = 55.68, Winter_Melon = 11.2, Cucumber = 17.48, Luffa = 21.58,
+  Bitter_Melon = 48.6, Pumpkin = 14.45, Tomato = 20, Chili_Pepper = 40, Eggplant = 39.9, Green_Pepper = 45.5,
+  Wood_Ear_Mushroom = 54, Enoki_Mushroom = 58, Mushroom = 65.34, Shiitake_Mushroom = 77, Kelp = 44,
+  Apple = 14.45, Banana = 32.2, Orange = 12.58, Pomelo = 11.73, Pear = 5.74, Peach = 23.14, Mango = 12,
+  Muskmelon = 8.58, Grape = 12.04, Persimmon = 12.88, Longan = 11, Lychee = 13.14, Loquat = 12.4,
+  Watermelon = 8.26, Strawberry = 21.34, Kiwi = 14.94, Water_Chestnut = 20.28, Dried_Shiitake = 577.6,
+  Dried_Kelp = 43.12, Dried_Seaweed = 1061, Dried_Scallop = 1788, Dried_Fish = 1885)
+  )
+
+  df$tyrosine <- calc_sparse_nutrient(
+c(rice = 90, White_Congee = 50, Rice_Noodles = 256, Noodles = 163, Macaroni_Pasta = 370, Oatmeal = 282,
+  Deep_fried_dough_sticks = 259, Fish_balls = 350, Cuttlefish_Balls = 430, Sweet_Potato = 36.12, Taro = 97,
+  Salted_Duck_Egg = 487.2, Century_Egg = 551.7, Pork_Floss = 1117, Ham_Sausage = 534.75,
+  Chicken_Egg = 430.65, Duck_Egg = 495.9, Pork = 541.45, Pork_Chops = 385.365, Beef = 671, Mutton = 693,
+  Rabbit_Meat = 796, Chicken = 408.24, Duck = 416.84, Pork_Tripe = 382.08, Pork_Liver = 700,
+  Pork_Trotters = 161.4, Chicken_Gizzard = 564, Chicken_Wings = 407.1, Chicken_Feet = 211.8,
+  Grass_Carp = 300.44, Silver_Carp = 332.45, Crucian_Carp = 297.54, Perch = 374.68, Yellow_Croaker = 388.16,
+  Sardine = 348.4, Black_Carp = 407.61, Mackerel = 250.39, Spanish_Mackerel = 548.28, Pomfret = 397.6,
+  Hairtail = 438.52, Mandarin_Fish = 483.73, Dike_Fish = 314.88, Bream = 379.96, Rice_Eel = 404.68,
+  Squid = 520.89, Crab = 900, Sea_Shrimp = 398.84, Clam = 128.31, Oyster = 207, Razor_Clam = 137.94,
+  Mussel = 200.41, Jellyfish = 58, Fresh_Milk_Boxed_Milk = 105, Milk_Powder = 946, Yogurt = 118,
+  Soy_Milk = 77, Breakfast_Milk_Breakfast_Drink = 83, Peanuts = 165.89, Other_Nuts = 353.065179,
+  Soybeans = 1169, Mung_Beans = 690, Tofu = 241, Dried_Tofu = 585, Tofu_Skin = 1940, Tofu_Strips = 600,
+  Fried_Tofu = 649, Soybean_Sprouts = 95, Mung_Bean_Sprouts = 45, Snow_Peas = 51.04,
+  White_Radish_Leaves = 126, Carrot_Leaves = 107, Carrot = 18.24, White_Radish = 13.3, Lotus_Root = 29.92,
+  Bamboo_Shoots = 194.67, Bokchoy = 38.54, Chinese_Cabbage = 23.14, Onion = 16.2, Garlic = 90.1,
+  Amaranth = 107.3, Chinese_Chives = 50.4, Water_Spinach = 56, Spinach = 74.76, Mustard_Greens = 31.96,
+  Shepherds_Purse = 89.76, Rapeseed = 39.36, Winter_Melon = 7.2, Cucumber = 13.8, Luffa = 20.75,
+  Bitter_Melon = 32.4, Pumpkin = 18.7, Tomato = 14, Chili_Pepper = 36.8, Eggplant = 24.225,
+  Green_Pepper = 41.86, Wood_Ear_Mushroom = 36, Enoki_Mushroom = 71, Mushroom = 35.64,
+  Shiitake_Mushroom = 63, Kelp = 33, Apple = 12.75, Banana = 18.2, Orange = 10.36, Pomelo = 28.29,
+  Pear = 5.74, Peach = 15.13, Mango = 8.4, Muskmelon = 7.02, Grape = 8.6, Persimmon = 5.52, Longan = 14,
+  Lychee = 10.95, Loquat = 11.16, Watermelon = 5.9, Strawberry = 16.49, Kiwi = 16.6, Water_Chestnut = 28.08,
+  Dried_Shiitake = 398.05, Dried_Kelp = 32.34, Dried_Seaweed = 713, Dried_Scallop = 1503, Dried_Fish = 1450)
+  )
+
+  df$threonine <- calc_sparse_nutrient(
+c(rice = 100, White_Congee = 50, Rice_Noodles = 248, Noodles = 170, Macaroni_Pasta = 335, Oatmeal = 415,
+  Deep_fried_dough_sticks = 165, Fish_balls = 510, Cuttlefish_Balls = 560, Sweet_Potato = 49.02, Taro = 92,
+  Salted_Duck_Egg = 596.4, Century_Egg = 655.2, Pork_Floss = 1055, Ham_Sausage = 623.75,
+  Chicken_Egg = 511.56, Duck_Egg = 603.78, Pork = 640.64, Pork_Chops = 484.035, Beef = 893, Mutton = 932,
+  Rabbit_Meat = 835, Chicken = 555.66, Duck = 467.16, Pork_Tripe = 549.12, Pork_Liver = 800,
+  Pork_Trotters = 300, Chicken_Gizzard = 818, Chicken_Wings = 510.6, Chicken_Feet = 400.8,
+  Grass_Carp = 398.46, Silver_Carp = 448.96, Crucian_Carp = 399.06, Perch = 530.7, Yellow_Croaker = 496.64,
+  Sardine = 435.5, Black_Carp = 521.64, Mackerel = 303.31, Spanish_Mackerel = 723.24, Pomfret = 517.3,
+  Hairtail = 546.44, Mandarin_Fish = 582.55, Dike_Fish = 499.2, Bream = 542.21, Rice_Eel = 516.57,
+  Squid = 701.31, Crab = 978, Sea_Shrimp = 431.88, Clam = 184.47, Oyster = 225, Razor_Clam = 172.14,
+  Mussel = 244.02, Jellyfish = 153.5, Fresh_Milk_Boxed_Milk = 127, Milk_Powder = 1161, Yogurt = 106,
+  Soy_Milk = 63, Breakfast_Milk_Breakfast_Drink = 113, Peanuts = 125.08, Other_Nuts = 365.629018,
+  Soybeans = 1435, Mung_Beans = 779, Tofu = 256, Dried_Tofu = 643, Tofu_Skin = 2200, Tofu_Strips = 484,
+  Fried_Tofu = 581, Soybean_Sprouts = 141, Mung_Bean_Sprouts = 64, Snow_Peas = 56.32,
+  White_Radish_Leaves = 173, Carrot_Leaves = 150, Carrot = 32.64, White_Radish = 21.85, Lotus_Root = 51.92,
+  Bamboo_Shoots = 47.88, Bokchoy = 53.58, Chinese_Cabbage = 36.49, Onion = 25.2, Garlic = 92.65,
+  Amaranth = 91.02, Chinese_Chives = 73.8, Water_Spinach = 68, Spinach = 101.46, Mustard_Greens = 76.14,
+  Shepherds_Purse = 104.72, Rapeseed = 48.96, Winter_Melon = 5.6, Cucumber = 18.4, Luffa = 23.24,
+  Bitter_Melon = 55.08, Pumpkin = 16.15, Tomato = 20, Chili_Pepper = 40.8, Eggplant = 30.4,
+  Green_Pepper = 46.41, Wood_Ear_Mushroom = 63, Enoki_Mushroom = 75, Mushroom = 72.27,
+  Shiitake_Mushroom = 83, Kelp = 40, Apple = 9.35, Banana = 34.3, Orange = 11.1, Pomelo = 33.12, Pear = 5.74,
+  Peach = 23.14, Mango = 12, Pineapple = 14.96, Muskmelon = 9.36, Grape = 11.18, Persimmon = 14.72,
+  Longan = 49, Lychee = 69.35, Loquat = 16.12, Watermelon = 7.67, Strawberry = 26.19, Kiwi = 19.92,
+  Water_Chestnut = 27.3, Dried_Shiitake = 703.95, Dried_Kelp = 39.2, Dried_Seaweed = 1103,
+  Dried_Scallop = 1963, Dried_Fish = 2026)
+  )
+
+  df$tryptophan <- calc_sparse_nutrient(
+c(rice = 30, White_Congee = 10, Rice_Noodles = 110, Noodles = 98, Macaroni_Pasta = 131, Oatmeal = 131,
+  Deep_fried_dough_sticks = 96, Fish_balls = 80, Cuttlefish_Balls = 90, Sweet_Potato = 20.64, Taro = 42,
+  Potato = 27.26, Salted_Duck_Egg = 168, Century_Egg = 201.6, Pork_Floss = 363, Ham_Sausage = 181.5,
+  Chicken_Egg = 162.69, Duck_Egg = 182.7, Pork = 113.75, Pork_Chops = 142.83, Beef = 125, Mutton = 143,
+  Rabbit_Meat = 286, Chicken = 129.78, Duck = 144.84, Pork_Tripe = 90.24, Pork_Liver = 80,
+  Pork_Trotters = 27.6, Chicken_Wings = 89.7, Chicken_Feet = 77.4, Grass_Carp = 98.6, Silver_Carp = 115.29,
+  Crucian_Carp = 96.12, Perch = 104.98, Yellow_Croaker = 99.2, Sardine = 80.4, Black_Carp = 153.72,
+  Mackerel = 100.94, Spanish_Mackerel = 187.92, Pomfret = 156.8, Hairtail = 157.32, Mandarin_Fish = 115.9,
+  Dike_Fish = 131.2, Bream = 100.3, Rice_Eel = 167.5, Squid = 176.54, Sea_Shrimp = 129.8, Clam = 46.8,
+  Oyster = 53, Razor_Clam = 50.73, Mussel = 76.93, Jellyfish = 17, Milk_Powder = 191, Yogurt = 57,
+  Soy_Milk = 44, Peanuts = 60.42, Other_Nuts = 123.934821, Soybeans = 455, Mung_Beans = 246, Tofu = 93,
+  Dried_Tofu = 220, Tofu_Skin = 700, Tofu_Strips = 218, Fried_Tofu = 234, Soybean_Sprouts = 56,
+  Mung_Bean_Sprouts = 22, White_Radish_Leaves = 78, Carrot_Leaves = 80, Carrot = 9.6, White_Radish = 6.65,
+  Lotus_Root = 22.88, Bamboo_Shoots = 22.68, Bokchoy = 21.62, Chinese_Cabbage = 9.79, Onion = 13.5,
+  Garlic = 90.1, Amaranth = 25.9, Chinese_Chives = 25.2, Water_Spinach = 48, Spinach = 32.04,
+  Shepherds_Purse = 39.6, Rapeseed = 22.08, Winter_Melon = 3.2, Cucumber = 5.52, Luffa = 7.47,
+  Bitter_Melon = 10.53, Pumpkin = 8.5, Tomato = 5, Chili_Pepper = 16, Eggplant = 7.125, Green_Pepper = 18.2,
+  Wood_Ear_Mushroom = 19, Enoki_Mushroom = 41, Mushroom = 31.68, Shiitake_Mushroom = 39, Kelp = 7,
+  Apple = 9.35, Banana = 4.2, Orange = 2.22, Pomelo = 3.45, Pear = 7.38, Peach = 3.56, Pineapple = 1.36,
+  Muskmelon = 1.56, Grape = 5.16, Longan = 5.5, Lychee = 3.65, Loquat = 1.24, Watermelon = 2.36,
+  Strawberry = 8.73, Kiwi = 11.62, Water_Chestnut = 14.82, Dried_Shiitake = 210.9, Dried_Kelp = 6.86,
+  Dried_Seaweed = 398, Dried_Scallop = 537, Dried_Fish = 654)
+  )
+
+  df$valine <- calc_sparse_nutrient(
+c(rice = 170, White_Congee = 90, Rice_Noodles = 442, Noodles = 300, Macaroni_Pasta = 549, Oatmeal = 541,
+  Fish_balls = 500, Cuttlefish_Balls = 540, Sweet_Potato = 61.06, Taro = 112, Potato = 81.78,
+  Salted_Duck_Egg = 613.2, Century_Egg = 729.9, Pork_Floss = 1295, Ham_Sausage = 681.5, Chicken_Egg = 553.32,
+  Duck_Egg = 628.14, Pork = 661.57, Pork_Chops = 501.63, Beef = 936, Mutton = 992, Rabbit_Meat = 1008,
+  Chicken = 574.56, Duck = 520.88, Pork_Tripe = 628.8, Pork_Liver = 910, Pork_Trotters = 375,
+  Chicken_Gizzard = 869, Chicken_Wings = 524.4, Chicken_Feet = 450.6, Grass_Carp = 521.42,
+  Silver_Carp = 535.58, Crucian_Carp = 465.48, Perch = 582.32, Yellow_Croaker = 539.84, Sardine = 475.7,
+  Black_Carp = 607.32, Mackerel = 360.15, Spanish_Mackerel = 774.72, Pomfret = 625.8, Hairtail = 615.6,
+  Mandarin_Fish = 581.33, Dike_Fish = 594.56, Bream = 551.65, Rice_Eel = 565.48, Squid = 693.55, Crab = 1006,
+  Sea_Shrimp = 496.19, Clam = 182.91, Oyster = 248, Razor_Clam = 161.31, Mussel = 237.65, Jellyfish = 177,
+  Fresh_Milk_Boxed_Milk = 158, Milk_Powder = 1189, Yogurt = 136, Soy_Milk = 83,
+  Breakfast_Milk_Breakfast_Drink = 148, Peanuts = 205.64, Other_Nuts = 525.551786, Soybeans = 1726,
+  Mung_Beans = 1189, Tofu = 296, Dried_Tofu = 883, Tofu_Skin = 2440, Tofu_Strips = 883, Fried_Tofu = 825,
+  Soybean_Sprouts = 199, Mung_Bean_Sprouts = 127, Snow_Peas = 64.24, White_Radish_Leaves = 221,
+  Carrot_Leaves = 198, Carrot = 51.84, White_Radish = 29.45, Lotus_Root = 50.16, Bamboo_Shoots = 66.78,
+  Bokchoy = 70.5, Chinese_Cabbage = 47.17, Onion = 39.6, Garlic = 130.05, Amaranth = 168.72,
+  Chinese_Chives = 73.8, Water_Spinach = 85, Spinach = 106.8, Mustard_Greens = 122.2,
+  Shepherds_Purse = 128.48, Rapeseed = 60.48, Winter_Melon = 11.2, Cucumber = 21.16, Luffa = 30.71,
+  Bitter_Melon = 45.36, Pumpkin = 22.1, Tomato = 15, Chili_Pepper = 46.4, Eggplant = 45.125,
+  Green_Pepper = 52.78, Wood_Ear_Mushroom = 58, Enoki_Mushroom = 85, Mushroom = 99, Shiitake_Mushroom = 95,
+  Kelp = 57, Apple = 17.85, Banana = 50.4, Orange = 14.8, Pomelo = 28.29, Pear = 8.2, Peach = 29.37,
+  Mango = 12, Pineapple = 3.4, Muskmelon = 10.92, Grape = 11.18, Persimmon = 14.72, Longan = 23.5,
+  Lychee = 22.63, Watermelon = 11.8, Strawberry = 28.13, Kiwi = 28.22, Water_Chestnut = 38.22,
+  Dried_Shiitake = 654.55, Dried_Kelp = 55.86, Dried_Seaweed = 1375, Dried_Scallop = 2218, Dried_Fish = 2364)
+  )
+
+  df$arginine <- calc_sparse_nutrient(
+c(rice = 210, White_Congee = 100, Rice_Noodles = 519, Noodles = 242, Macaroni_Pasta = 432, Oatmeal = 702,
+  Deep_fried_dough_sticks = 254, Fish_balls = 700, Cuttlefish_Balls = 710, Sweet_Potato = 61.06, Taro = 109,
+  Potato = 66.74, Salted_Duck_Egg = 571.2, Century_Egg = 678.6, Pork_Floss = 1431, Ham_Sausage = 926,
+  Chicken_Egg = 646.41, Duck_Egg = 602.91, Pork = 920.92, Pork_Chops = 716.565, Beef = 1262, Mutton = 1225,
+  Rabbit_Meat = 1351, Chicken = 850.5, Duck = 633.76, Pork_Tripe = 910.08, Pork_Liver = 1060,
+  Pork_Trotters = 1092, Chicken_Gizzard = 1344, Chicken_Wings = 821.1, Chicken_Feet = 1243.2,
+  Grass_Carp = 560.28, Silver_Carp = 646.6, Crucian_Carp = 556.74, Perch = 832.3, Yellow_Croaker = 684.16,
+  Sardine = 502.5, Black_Carp = 678.51, Mackerel = 434.14, Spanish_Mackerel = 838.44, Pomfret = 777.7,
+  Hairtail = 791.92, Mandarin_Fish = 761.28, Dike_Fish = 729.6, Bream = 743.99, Rice_Eel = 871,
+  Squid = 973.88, Crab = 1926, Sea_Shrimp = 1099.76, Clam = 292.5, Razor_Clam = 262.2, Mussel = 364.07,
+  Jellyfish = 355.5, Fresh_Milk_Boxed_Milk = 82, Milk_Powder = 715, Yogurt = 84, Soy_Milk = 135,
+  Breakfast_Milk_Breakfast_Drink = 73, Other_Nuts = 1339.433036, Soybeans = 2840, Mung_Beans = 1577,
+  Tofu = 487, Dried_Tofu = 1260, Tofu_Skin = 3750, Tofu_Strips = 1440, Fried_Tofu = 1382,
+  Soybean_Sprouts = 247, Mung_Bean_Sprouts = 130, Snow_Peas = 96.8, White_Radish_Leaves = 139,
+  Carrot_Leaves = 95, Carrot = 40.32, White_Radish = 33.25, Lotus_Root = 42.24, Bamboo_Shoots = 64.26,
+  Bokchoy = 61.1, Chinese_Cabbage = 50.73, Onion = 143.1, Garlic = 765.85, Amaranth = 127.28,
+  Chinese_Chives = 81, Water_Spinach = 94, Spinach = 119.26, Mustard_Greens = 87.42, Shepherds_Purse = 80.96,
+  Rapeseed = 65.28, Winter_Melon = 15.2, Cucumber = 18.4, Luffa = 41.5, Bitter_Melon = 72.9, Pumpkin = 24.65,
+  Tomato = 18, Chili_Pepper = 37.6, Eggplant = 49.875, Green_Pepper = 42.77, Wood_Ear_Mushroom = 69,
+  Enoki_Mushroom = 63, Mushroom = 82.17, Shiitake_Mushroom = 71, Kelp = 66, Apple = 7.65, Banana = 42,
+  Orange = 48.84, Pomelo = 17.25, Pear = 4.92, Peach = 26.7, Mango = 18, Pineapple = 14.96,
+  Muskmelon = 17.94, Grape = 32.68, Persimmon = 15.64, Longan = 29, Lychee = 16.06, Loquat = 14.88,
+  Watermelon = 38.94, Strawberry = 41.71, Kiwi = 24.9, Water_Chestnut = 78.78, Dried_Shiitake = 807.5,
+  Dried_Kelp = 64.68, Dried_Seaweed = 1478, Dried_Scallop = 5058, Dried_Fish = 2786)
+  )
+
+  df$histidine <- calc_sparse_nutrient(
+c(rice = 60, White_Congee = 30, Rice_Noodles = 190, Noodles = 118, Macaroni_Pasta = 226, Oatmeal = 264,
+  Deep_fried_dough_sticks = 147, Fish_balls = 200, Cuttlefish_Balls = 250, Sweet_Potato = 23.22, Taro = 40,
+  Potato = 25.38, Salted_Duck_Egg = 226.8, Century_Egg = 311.4, Pork_Floss = 812, Ham_Sausage = 509,
+  Chicken_Egg = 231.42, Duck_Egg = 222.72, Pork = 512.33, Pork_Chops = 372.6, Beef = 692, Mutton = 556,
+  Rabbit_Meat = 632, Chicken = 367.29, Duck = 293.76, Pork_Tripe = 268.8, Pork_Liver = 460,
+  Pork_Trotters = 270, Chicken_Gizzard = 421, Chicken_Wings = 317.4, Chicken_Feet = 186, Grass_Carp = 258.1,
+  Silver_Carp = 283.65, Crucian_Carp = 225.72, Perch = 233.74, Yellow_Croaker = 221.76, Sardine = 341.7,
+  Black_Carp = 379.89, Mackerel = 359.66, Spanish_Mackerel = 763.56, Pomfret = 242.9, Hairtail = 275.88,
+  Mandarin_Fish = 266.57, Dike_Fish = 548.48, Bream = 302.67, Rice_Eel = 274.03, Squid = 292.94, Crab = 572,
+  Sea_Shrimp = 236, Clam = 101.4, Razor_Clam = 57.57, Mussel = 95.55, Jellyfish = 23.5,
+  Fresh_Milk_Boxed_Milk = 70, Milk_Powder = 553, Yogurt = 65, Soy_Milk = 41,
+  Breakfast_Milk_Breakfast_Drink = 72, Peanuts = 138.86, Other_Nuts = 232.643973, Soybeans = 968,
+  Mung_Beans = 647, Tofu = 161, Dried_Tofu = 392, Tofu_Skin = 1260, Tofu_Strips = 403, Fried_Tofu = 375,
+  Soybean_Sprouts = 107, Mung_Bean_Sprouts = 53, Snow_Peas = 44.88, White_Radish_Leaves = 75,
+  Carrot_Leaves = 65, Carrot = 13.44, White_Radish = 12.35, Lotus_Root = 28.16, Bamboo_Shoots = 27.09,
+  Bokchoy = 24.44, Chinese_Cabbage = 17.8, Onion = 14.4, Garlic = 53.55, Amaranth = 46.62,
+  Chinese_Chives = 27, Water_Spinach = 23, Spinach = 49.84, Mustard_Greens = 35.72, Shepherds_Purse = 78.32,
+  Rapeseed = 29.76, Winter_Melon = 4, Cucumber = 9.2, Luffa = 14.94, Bitter_Melon = 18.63, Pumpkin = 9.35,
+  Tomato = 12, Chili_Pepper = 16, Eggplant = 19.475, Green_Pepper = 18.2, Wood_Ear_Mushroom = 32,
+  Enoki_Mushroom = 30, Mushroom = 35.64, Shiitake_Mushroom = 38, Kelp = 13, Apple = 4.25, Banana = 62.3,
+  Orange = 6.66, Pomelo = 12.42, Pear = 4.1, Peach = 17.8, Mango = 16.8, Pineapple = 8.84, Muskmelon = 4.68,
+  Grape = 6.88, Persimmon = 5.52, Longan = 15.5, Lychee = 12.41, Loquat = 8.68, Watermelon = 5.31,
+  Strawberry = 14.55, Kiwi = 9.96, Water_Chestnut = 17.16, Dried_Shiitake = 270.75, Dried_Kelp = 12.74,
+  Dried_Seaweed = 225, Dried_Scallop = 953, Dried_Fish = 884)
+  )
+
+  df$alanine <- calc_sparse_nutrient(
+c(rice = 160, White_Congee = 70, Rice_Noodles = 417, Noodles = 210, Macaroni_Pasta = 376, Oatmeal = 568,
+  Deep_fried_dough_sticks = 230, Fish_balls = 650, Cuttlefish_Balls = 660, Sweet_Potato = 50.74, Taro = 115,
+  Potato = 56.4, Salted_Duck_Egg = 495.6, Century_Egg = 602.1, Pork_Floss = 1289, Ham_Sausage = 818.75,
+  Chicken_Egg = 572.46, Duck_Egg = 507.21, Pork = 831.74, Pork_Chops = 639.285, Beef = 1152, Mutton = 1248,
+  Rabbit_Meat = 1135, Chicken = 754.11, Duck = 615.4, Pork_Tripe = 831.36, Pork_Liver = 1160,
+  Pork_Trotters = 1212, Chicken_Gizzard = 1036, Chicken_Wings = 759, Chicken_Feet = 1518.6,
+  Grass_Carp = 583.48, Silver_Carp = 600.24, Crucian_Carp = 525.42, Yellow_Croaker = 668.8, Sardine = 556.1,
+  Black_Carp = 740.25, Mackerel = 392.49, Spanish_Mackerel = 989.28, Pomfret = 762.3, Hairtail = 791.92,
+  Mandarin_Fish = 771.65, Dike_Fish = 614.4, Bream = 735.14, Rice_Eel = 755.76, Squid = 838.08, Crab = 1356,
+  Sea_Shrimp = 762.28, Clam = 202.41, Oyster = 287, Razor_Clam = 345.99, Mussel = 256.27, Jellyfish = 270,
+  Fresh_Milk_Boxed_Milk = 86, Milk_Powder = 690, Yogurt = 82, Soy_Milk = 59,
+  Breakfast_Milk_Breakfast_Drink = 74, Peanuts = 216.24, Other_Nuts = 528.320089, Soybeans = 1542,
+  Mung_Beans = 999, Tofu = 280, Dried_Tofu = 724, Tofu_Skin = 2280, Tofu_Strips = 718, Fried_Tofu = 679,
+  Soybean_Sprouts = 185, Mung_Bean_Sprouts = 66, Snow_Peas = 105.6, White_Radish_Leaves = 170,
+  Carrot_Leaves = 134, Carrot = 54.72, White_Radish = 24.7, Lotus_Root = 71.28, Bamboo_Shoots = 66.78,
+  Bokchoy = 76.14, Chinese_Cabbage = 58.74, Onion = 29.7, Garlic = 102.85, Amaranth = 137.64,
+  Chinese_Chives = 115.2, Water_Spinach = 106, Spinach = 119.26, Mustard_Greens = 100.58,
+  Shepherds_Purse = 128.48, Rapeseed = 74.88, Winter_Melon = 6.4, Cucumber = 21.16, Luffa = 35.69,
+  Bitter_Melon = 39.69, Pumpkin = 32.3, Tomato = 17, Chili_Pepper = 40, Eggplant = 38.95,
+  Green_Pepper = 45.5, Wood_Ear_Mushroom = 82, Enoki_Mushroom = 116, Mushroom = 157.41,
+  Shiitake_Mushroom = 96, Kelp = 68, Apple = 11.9, Banana = 30.8, Orange = 17.02, Pomelo = 33.12,
+  Pear = 4.92, Peach = 25.81, Mango = 36, Muskmelon = 21.84, Grape = 15.48, Persimmon = 14.72, Longan = 53.5,
+  Lychee = 66.43, Loquat = 21.08, Watermelon = 8.85, Strawberry = 49.47, Kiwi = 33.2, Water_Chestnut = 31.98,
+  Dried_Shiitake = 757.15, Dried_Kelp = 66.64, Dried_Seaweed = 2207, Dried_Scallop = 2105, Dried_Fish = 2634)
+  )
+
+  df$aspartic_acid <- calc_sparse_nutrient(
+c(rice = 260, White_Congee = 120, Rice_Noodles = 682, Noodles = 267, Macaroni_Pasta = 505, Oatmeal = 925,
+  Deep_fried_dough_sticks = 262, Fish_balls = 1100, Cuttlefish_Balls = 1210, Sweet_Potato = 187.48,
+  Taro = 293, Potato = 334.64, Salted_Duck_Egg = 966, Century_Egg = 1060.2, Pork_Floss = 2157,
+  Ham_Sausage = 1292.5, Chicken_Egg = 1054.44, Duck_Egg = 950.91, Pork = 1255.8, Pork_Chops = 975.66,
+  Beef = 1725, Mutton = 1832, Rabbit_Meat = 1708, Chicken = 1162.35, Duck = 932.96, Pork_Tripe = 1116.48,
+  Pork_Liver = 1640, Pork_Trotters = 900, Chicken_Gizzard = 1698, Chicken_Wings = 1090.2,
+  Chicken_Feet = 1029, Grass_Carp = 891.46, Silver_Carp = 1067.5, Crucian_Carp = 950.94, Perch = 704.7,
+  Yellow_Croaker = 1092.8, Sardine = 931.3, Black_Carp = 1123.92, Mackerel = 653.66,
+  Spanish_Mackerel = 1469.52, Pomfret = 1173.2, Hairtail = 1228.16, Mandarin_Fish = 1234.03,
+  Dike_Fish = 842.88, Bream = 1249.03, Rice_Eel = 1097.46, Squid = 1618.93, Crab = 2070, Sea_Shrimp = 985.3,
+  Clam = 317.85, Oyster = 521, Razor_Clam = 372.21, Mussel = 447.37, Jellyfish = 404.5,
+  Fresh_Milk_Boxed_Milk = 231, Milk_Powder = 1632, Yogurt = 188, Soy_Milk = 186,
+  Breakfast_Milk_Breakfast_Drink = 194, Peanuts = 585.65, Other_Nuts = 1190.051116, Soybeans = 3997,
+  Mung_Beans = 2671, Tofu = 770, Dried_Tofu = 2022, Tofu_Skin = 6080, Tofu_Strips = 1694, Fried_Tofu = 1816,
+  Soybean_Sprouts = 879, Mung_Bean_Sprouts = 505, Snow_Peas = 482.24, White_Radish_Leaves = 397,
+  Carrot_Leaves = 358, Carrot = 120.96, White_Radish = 46.55, Lotus_Root = 504.24, Bamboo_Shoots = 178.29,
+  Bokchoy = 122.2, Chinese_Cabbage = 93.45, Onion = 77.4, Garlic = 331.5, Amaranth = 225.7,
+  Chinese_Chives = 154.8, Water_Spinach = 173, Spinach = 200.25, Mustard_Greens = 151.34,
+  Shepherds_Purse = 226.16, Rapeseed = 160.32, Winter_Melon = 24.8, Cucumber = 30.36, Luffa = 71.38,
+  Bitter_Melon = 34.83, Pumpkin = 68.85, Tomato = 84, Chili_Pepper = 165.6, Eggplant = 110.2,
+  Green_Pepper = 188.37, Wood_Ear_Mushroom = 118, Enoki_Mushroom = 105, Mushroom = 164.34,
+  Shiitake_Mushroom = 143, Kelp = 88, Apple = 57.8, Banana = 109.9, Orange = 67.34, Pomelo = 126.96,
+  Pear = 18.86, Peach = 98.79, Mango = 26.4, Pineapple = 67.32, Muskmelon = 31.98, Grape = 17.2,
+  Persimmon = 29.44, Longan = 78, Lychee = 94.17, Loquat = 95.48, Watermelon = 19.47, Strawberry = 170.72,
+  Water_Chestnut = 262.86, Dried_Shiitake = 1378.45, Dried_Kelp = 86.24, Dried_Seaweed = 2089,
+  Dried_Scallop = 5288, Dried_Fish = 4633)
+  )
+
+  df$glutamic_acid <- calc_sparse_nutrient(
+c(rice = 520, White_Congee = 250, Rice_Noodles = 1470, Noodles = 1947, Macaroni_Pasta = 3168, Oatmeal = 2338,
+  Deep_fried_dough_sticks = 2735, Fish_balls = 2290, Cuttlefish_Balls = 2510, Sweet_Potato = 103.2,
+  Taro = 254, Potato = 253.8, Salted_Duck_Egg = 1344, Century_Egg = 1639.8, Pork_Floss = 4202,
+  Ham_Sausage = 2181.75, Chicken_Egg = 1385.91, Duck_Egg = 1410.27, Pork = 2074.8, Pork_Chops = 1652.205,
+  Beef = 2832, Mutton = 2974, Rabbit_Meat = 2913, Chicken = 1940.4, Duck = 1628.6, Pork_Tripe = 1942.08,
+  Pork_Liver = 2330, Pork_Trotters = 1512, Chicken_Gizzard = 3021, Chicken_Wings = 1821.6,
+  Chicken_Feet = 1753.8, Grass_Carp = 1412.88, Silver_Carp = 1717.76, Crucian_Carp = 1371.06,
+  Perch = 1483.64, Yellow_Croaker = 1731.84, Sardine = 1427.1, Black_Carp = 1757.07, Mackerel = 930.02,
+  Spanish_Mackerel = 2013.84, Pomfret = 1846.6, Hairtail = 2028.44, Mandarin_Fish = 2072.17,
+  Dike_Fish = 1431.04, Bream = 1968.24, Rice_Eel = 1792.92, Squid = 2654.89, Crab = 3134,
+  Sea_Shrimp = 1778.85, Clam = 452.4, Oyster = 766, Razor_Clam = 552.9, Mussel = 617.4, Jellyfish = 612.5,
+  Fresh_Milk_Boxed_Milk = 632, Milk_Powder = 3665, Yogurt = 509, Soy_Milk = 284,
+  Breakfast_Milk_Breakfast_Drink = 535, Peanuts = 971.49, Other_Nuts = 2185.149777, Soybeans = 6258,
+  Mung_Beans = 4188, Tofu = 1259, Dried_Tofu = 3322, Tofu_Skin = 9710, Tofu_Strips = 2936, Fried_Tofu = 3107,
+  Soybean_Sprouts = 426, Mung_Bean_Sprouts = 121, Snow_Peas = 431.2, White_Radish_Leaves = 498,
+  Carrot_Leaves = 478, Carrot = 220.8, White_Radish = 100.7, Lotus_Root = 185.68, Bamboo_Shoots = 155.61,
+  Bokchoy = 212.44, Chinese_Cabbage = 328.41, Onion = 252.9, Garlic = 609.45, Amaranth = 256.78,
+  Chinese_Chives = 271.8, Water_Spinach = 182, Spinach = 296.37, Mustard_Greens = 241.58,
+  Shepherds_Purse = 258.72, Rapeseed = 206.4, Winter_Melon = 88.8, Cucumber = 188.6, Luffa = 131.97,
+  Bitter_Melon = 78.57, Pumpkin = 89.25, Tomato = 311, Chili_Pepper = 168.8, Eggplant = 159.125,
+  Green_Pepper = 192.01, Wood_Ear_Mushroom = 133, Enoki_Mushroom = 245, Mushroom = 398.97,
+  Shiitake_Mushroom = 284, Kelp = 122, Apple = 25.5, Banana = 120.4, Orange = 37.74, Pomelo = 55.89,
+  Pear = 8.2, Peach = 62.3, Mango = 48.6, Pineapple = 40.8, Muskmelon = 87.36, Grape = 39.56,
+  Persimmon = 32.2, Longan = 89, Lychee = 100.01, Loquat = 59.52, Watermelon = 56.64, Kiwi = 73.04,
+  Water_Chestnut = 59.28, Dried_Shiitake = 2716.05, Dried_Kelp = 119.56, Dried_Seaweed = 2082,
+  Dried_Scallop = 8710, Dried_Fish = 10617)
+  )
+
+  df$glycine <- calc_sparse_nutrient(
+c(rice = 130, White_Congee = 60, Rice_Noodles = 346, Noodles = 229, Macaroni_Pasta = 462, Oatmeal = 589,
+  Deep_fried_dough_sticks = 264, Fish_balls = 590, Cuttlefish_Balls = 450, Sweet_Potato = 41.28, Taro = 114,
+  Potato = 48.88, Salted_Duck_Egg = 327.6, Century_Egg = 423, Pork_Floss = 1039, Ham_Sausage = 730.25,
+  Chicken_Egg = 342.78, Duck_Egg = 354.96, Pork = 706.16, Pork_Chops = 602.37, Beef = 988, Mutton = 1026,
+  Rabbit_Meat = 909, Chicken = 583.38, Duck = 540.6, Pork_Tripe = 1278.72, Pork_Liver = 1150,
+  Pork_Trotters = 2958, Chicken_Gizzard = 1214, Chicken_Wings = 752.1, Chicken_Feet = 338.4,
+  Grass_Carp = 544.62, Silver_Carp = 547.17, Crucian_Carp = 528.66, Perch = 779.52, Yellow_Croaker = 558.72,
+  Sardine = 475.7, Black_Carp = 578.97, Mackerel = 316.05, Spanish_Mackerel = 867.24, Pomfret = 760.2,
+  Hairtail = 844.36, Mandarin_Fish = 680.15, Dike_Fish = 554.88, Bream = 715.67, Rice_Eel = 824.77,
+  Squid = 808.98, Crab = 1145, Sea_Shrimp = 1142.24, Clam = 196.95, Oyster = 324, Razor_Clam = 256.5,
+  Mussel = 311.64, Jellyfish = 827.5, Fresh_Milk_Boxed_Milk = 46, Milk_Powder = 424, Yogurt = 46,
+  Soy_Milk = 72, Breakfast_Milk_Breakfast_Drink = 44, Peanuts = 314.82, Other_Nuts = 533.004911,
+  Soybeans = 1600, Mung_Beans = 886, Tofu = 264, Dried_Tofu = 702, Tofu_Skin = 2150, Tofu_Strips = 637,
+  Fried_Tofu = 635, Soybean_Sprouts = 126, Mung_Bean_Sprouts = 41, Snow_Peas = 37.84,
+  White_Radish_Leaves = 166, Carrot_Leaves = 144, Carrot = 29.76, White_Radish = 16.15, Lotus_Root = 33.44,
+  Bamboo_Shoots = 53.55, Bokchoy = 62.98, Chinese_Cabbage = 35.6, Onion = 29.7, Garlic = 100.3,
+  Amaranth = 129.5, Chinese_Chives = 90, Water_Spinach = 84, Spinach = 120.15, Mustard_Greens = 91.18,
+  Shepherds_Purse = 117.92, Rapeseed = 53.76, Winter_Melon = 6.4, Cucumber = 24.84, Luffa = 25.73,
+  Bitter_Melon = 31.59, Pumpkin = 18.7, Tomato = 14, Chili_Pepper = 44, Eggplant = 33.25,
+  Green_Pepper = 50.05, Wood_Ear_Mushroom = 58, Enoki_Mushroom = 66, Mushroom = 86.13,
+  Shiitake_Mushroom = 78, Kelp = 65, Apple = 10.2, Banana = 30.1, Orange = 13.32, Pomelo = 15.87,
+  Pear = 4.92, Peach = 33.82, Mango = 11.4, Pineapple = 15.64, Muskmelon = 11.7, Grape = 9.46,
+  Persimmon = 12.88, Longan = 17, Lychee = 26.28, Loquat = 16.12, Watermelon = 7.08, Strawberry = 30.07,
+  Kiwi = 21.58, Water_Chestnut = 28.86, Dried_Shiitake = 641.25, Dried_Kelp = 63.7, Dried_Seaweed = 1389,
+  Dried_Scallop = 6773, Dried_Fish = 1874)
+  )
+
+  df$proline <- calc_sparse_nutrient(
+c(rice = 120, White_Congee = 60, Rice_Noodles = 404, Noodles = 1100, Macaroni_Pasta = 1565, Oatmeal = 671,
+  Fish_balls = 410, Cuttlefish_Balls = 430, Sweet_Potato = 56.76, Taro = 83, Potato = 46.06,
+  Salted_Duck_Egg = 386.4, Century_Egg = 442.8, Pork_Floss = 679, Ham_Sausage = 504.75, Chicken_Egg = 298.41,
+  Duck_Egg = 345.39, Pork = 594.23, Pork_Chops = 455.745, Beef = 754, Mutton = 852, Rabbit_Meat = 752,
+  Chicken = 594.72, Duck = 497.76, Pork_Tripe = 872.64, Pork_Liver = 880, Pork_Trotters = 1596,
+  Chicken_Gizzard = 813, Chicken_Wings = 524.4, Chicken_Feet = 1677, Grass_Carp = 392.66,
+  Silver_Carp = 451.4, Crucian_Carp = 340.2, Perch = 593.92, Yellow_Croaker = 354.24, Sardine = 388.6,
+  Black_Carp = 422.1, Mackerel = 228.34, Spanish_Mackerel = 636.48, Pomfret = 469, Hairtail = 468.92,
+  Mandarin_Fish = 369.66, Dike_Fish = 499.2, Bream = 437.19, Rice_Eel = 525.95, Squid = 678.03, Crab = 1084,
+  Sea_Shrimp = 759.92, Clam = 134.16, Oyster = 240, Jellyfish = 281.5, Fresh_Milk_Boxed_Milk = 301,
+  Milk_Powder = 2063, Yogurt = 211, Soy_Milk = 136, Breakfast_Milk_Breakfast_Drink = 226, Peanuts = 293.62,
+  Other_Nuts = 516.501562, Soybeans = 1863, Mung_Beans = 999, Tofu = 320, Dried_Tofu = 661, Tofu_Skin = 2150,
+  Tofu_Strips = 701, Fried_Tofu = 682, Soybean_Sprouts = 167, Mung_Bean_Sprouts = 66,
+  White_Radish_Leaves = 220, Carrot_Leaves = 203, Carrot = 29.76, White_Radish = 13.3, Lotus_Root = 46.64,
+  Bamboo_Shoots = 42.84, Bokchoy = 73.32, Chinese_Cabbage = 37.38, Garlic = 96.05, Amaranth = 89.54,
+  Chinese_Chives = 81.9, Water_Spinach = 78, Spinach = 89.89, Mustard_Greens = 75.2, Shepherds_Purse = 90.64,
+  Rapeseed = 170.88, Winter_Melon = 8, Cucumber = 20.24, Luffa = 20.75, Bitter_Melon = 71.28, Pumpkin = 15.3,
+  Tomato = 17, Chili_Pepper = 46.4, Eggplant = 31.825, Green_Pepper = 52.78, Wood_Ear_Mushroom = 50,
+  Enoki_Mushroom = 76, Mushroom = 99.99, Kelp = 58, Apple = 9.35, Banana = 34.3, Orange = 68.82,
+  Pomelo = 40.71, Pear = 5.74, Peach = 30.26, Mango = 10.2, Pineapple = 17, Muskmelon = 7.8, Grape = 9.46,
+  Persimmon = 13.8, Longan = 29, Lychee = 40.88, Loquat = 19.84, Watermelon = 6.49, Strawberry = 29.1,
+  Kiwi = 26.56, Water_Chestnut = 14.04, Dried_Shiitake = 618.45, Dried_Kelp = 56.84, Dried_Seaweed = 757,
+  Dried_Scallop = 2331, Dried_Fish = 1179)
+  )
+
+  df$serine <- calc_sparse_nutrient(
+c(rice = 150, White_Congee = 70, Rice_Noodles = 392, Noodles = 307, Macaroni_Pasta = 599, Oatmeal = 533,
+  Deep_fried_dough_sticks = 300, Fish_balls = 480, Cuttlefish_Balls = 520, Sweet_Potato = 60.2, Taro = 125,
+  Salted_Duck_Egg = 814.8, Century_Egg = 915.3, Pork_Floss = 899, Ham_Sausage = 560.5, Chicken_Egg = 787.35,
+  Duck_Egg = 852.6, Pork = 581.49, Pork_Chops = 425.04, Beef = 790, Mutton = 768, Rabbit_Meat = 733,
+  Chicken = 546.84, Duck = 391, Pork_Tripe = 560.64, Pork_Liver = 870, Pork_Trotters = 502.8,
+  Chicken_Gizzard = 730, Chicken_Wings = 469.2, Chicken_Feet = 469.2, Grass_Carp = 370.62,
+  Silver_Carp = 400.16, Crucian_Carp = 346.14, Perch = 470.38, Yellow_Croaker = 451.84, Sardine = 388.6,
+  Black_Carp = 447.93, Mackerel = 261.66, Spanish_Mackerel = 633.24, Pomfret = 445.9, Hairtail = 478.04,
+  Mandarin_Fish = 529.48, Dike_Fish = 398.72, Bream = 479.08, Rice_Eel = 466.32, Squid = 638.26, Crab = 893,
+  Sea_Shrimp = 421.85, Clam = 152.1, Oyster = 252, Razor_Clam = 169.86, Mussel = 225.4, Jellyfish = 168.5,
+  Fresh_Milk_Boxed_Milk = 163, Milk_Powder = 1374, Yogurt = 130, Soy_Milk = 94,
+  Breakfast_Milk_Breakfast_Drink = 137, Peanuts = 237.97, Other_Nuts = 493.503348, Soybeans = 1846,
+  Mung_Beans = 1135, Tofu = 358, Dried_Tofu = 822, Tofu_Skin = 2790, Tofu_Strips = 838, Fried_Tofu = 784,
+  Soybean_Sprouts = 173, Mung_Bean_Sprouts = 67, Snow_Peas = 95.04, White_Radish_Leaves = 149,
+  Carrot_Leaves = 120, Carrot = 37.44, White_Radish = 17.1, Lotus_Root = 54.56, Bamboo_Shoots = 53.55,
+  Bokchoy = 50.76, Chinese_Cabbage = 43.61, Onion = 28.8, Garlic = 109.65, Amaranth = 91.02,
+  Chinese_Chives = 78.3, Water_Spinach = 74, Spinach = 90.78, Mustard_Greens = 65.8,
+  Shepherds_Purse = 104.72, Rapeseed = 51.84, Winter_Melon = 7.2, Cucumber = 23.92, Luffa = 29.05,
+  Bitter_Melon = 34.83, Pumpkin = 19.55, Tomato = 23, Chili_Pepper = 54.4, Eggplant = 33.25,
+  Green_Pepper = 61.88, Wood_Ear_Mushroom = 58, Enoki_Mushroom = 67, Mushroom = 70.29,
+  Shiitake_Mushroom = 86, Kelp = 44, Apple = 11.9, Banana = 35.7, Orange = 17.02, Pomelo = 25.53,
+  Pear = 4.92, Peach = 20.47, Mango = 16.2, Pineapple = 20.4, Muskmelon = 11.7, Grape = 11.18,
+  Persimmon = 12.88, Longan = 25, Lychee = 24.09, Loquat = 21.08, Watermelon = 8.26, Strawberry = 48.5,
+  Kiwi = 18.26, Water_Chestnut = 49.14, Dried_Shiitake = 716.3, Dried_Kelp = 43.12, Dried_Seaweed = 1083,
+  Dried_Scallop = 2268, Dried_Fish = 1756)
+  )
+
+  df$Fat <- calc_sparse_nutrient(
+c(rice = 0.4, White_Congee = 0.2, Noodles = 0.466667, White_Steamed_Bread = 1.3,
+  Deep_fried_dough_sticks = 17.6, Fish_balls = 1.3, Cuttlefish_Balls = 4.7, Sweet_Potato = 0.172,
+  Salted_Duck_Egg = 11.34, Century_Egg = 9.63, Pork_Floss = 26, Ham_Sausage = 23.2, Chicken_Egg = 7.482,
+  Duck_Egg = 11.31, Pork = 27.391, Pork_Chops = 20.01, Beef = 8.7, Mutton = 6.5, Rabbit_Meat = 2.1,
+  Chicken = 5.922, Duck = 13.396, Pork_Tripe = 4.896, Pork_Liver = 4.7, Pork_Trotters = 10.74,
+  Pork_Blood = 0.3, Chicken_Gizzard = 2.8, Chicken_Wings = 7.935, Chicken_Feet = 9.84, Grass_Carp = 3.016,
+  Silver_Carp = 2.196, Crucian_Carp = 1.458, Perch = 1.972, Yellow_Croaker = 2.432, Eel = 9.072,
+  Sardine = 0.737, Black_Carp = 2.646, Mackerel = 19.306, Spanish_Mackerel = 1.692, Pomfret = 5.11,
+  Hairtail = 3.724, Mandarin_Fish = 2.562, Dike_Fish = 8.192, Bream = 3.717, Horse_Mackerel = 2.38,
+  Rice_Eel = 0.938, Squid = 1.94, Crab = 1.2, Sea_Shrimp = 0.472, Clam = 0.429, Oyster = 2.1,
+  Razor_Clam = 0.171, Mussel = 0.833, Jellyfish = 0.3, Fresh_Milk_Boxed_Milk = 3.7, Milk_Powder = 22.3,
+  Yogurt = 2.6, Soy_Milk = 1.5, Breakfast_Milk_Breakfast_Drink = 3.2, Peanuts = 13.462,
+  Other_Nuts = 31.303125, Soybeans = 16, Mung_Beans = 0.8, Soybean_Milk = 1.6, Tofu = 5.3, Dried_Tofu = 11.3,
+  Tofu_Skin = 23, Tofu_Strips = 10.5, Fried_Tofu = 17.6, Soybean_Sprouts = 1.6, Mung_Bean_Sprouts = 0.1,
+  Wood_Ear_Mushroom = 0.2, Mushroom = 0.099, Shiitake_Mushroom = 0.3, Dried_Shiitake = 1.14,
+  Dried_Scallop = 2.4, Dried_Fish = 3.4)
+  )
+
+  df$fatty_acid_total <- calc_sparse_nutrient(
+c(rice = 0.3, White_Congee = 0.2, Noodles = 0.3, White_Steamed_Bread = 0.9, Deep_fried_dough_sticks = 10.2,
+  Fish_balls = 1.2, Cuttlefish_Balls = 4.2, Sweet_Potato = 0.172, Salted_Duck_Egg = 9.408,
+  Century_Egg = 8.01, Pork_Floss = 23.7, Ham_Sausage = 21.1, Chicken_Egg = 6.264, Duck_Egg = 9.396,
+  Pork = 24.297, Pork_Chops = 18.216, Beef = 8, Mutton = 7.4, Rabbit_Meat = 1.9, Chicken = 5.607,
+  Duck = 12.648, Pork_Tripe = 4.416, Pork_Liver = 3.5, Pork_Trotters = 9.78, Pork_Blood = 0.3,
+  Chicken_Gizzard = 2.6, Chicken_Wings = 7.521, Chicken_Feet = 9.3, Grass_Carp = 2.088, Silver_Carp = 1.525,
+  Crucian_Carp = 1.026, Perch = 1.392, Yellow_Croaker = 1.728, Eel = 6.384, Sardine = 0.67,
+  Black_Carp = 2.394, Mackerel = 13.524, Spanish_Mackerel = 1.188, Pomfret = 3.57, Hairtail = 2.584,
+  Mandarin_Fish = 1.769, Dike_Fish = 5.76, Bream = 2.596, Horse_Mackerel = 1.68, Rice_Eel = 0.67,
+  Squid = 1.422667, Crab = 0.8, Sea_Shrimp = 0.354, Clam = 0.312, Oyster = 1.5, Razor_Clam = 0.114,
+  Mussel = 0.588, Jellyfish = 0.2, Fresh_Milk_Boxed_Milk = 3.5, Milk_Powder = 20.2, Yogurt = 2.3,
+  Soy_Milk = 1.4, Breakfast_Milk_Breakfast_Drink = 3, Peanuts = 12.826, Other_Nuts = 29.936719,
+  Soybeans = 14.9, Mung_Beans = 0.6, Soybean_Milk = 1.5, Tofu = 4.9, Dried_Tofu = 13.2, Tofu_Skin = 21.4,
+  Tofu_Strips = 9.8, Fried_Tofu = 16.4, Soybean_Sprouts = 1.3, Mung_Bean_Sprouts = 0.1,
+  Wood_Ear_Mushroom = 0.2, Mushroom = 0.099, Shiitake_Mushroom = 0.2, Dried_Shiitake = 0.95,
+  Dried_Scallop = 1.7, Dried_Fish = 2.4)
+  )
+
+  df$fatty_acid_saturated <- calc_sparse_nutrient(
+c(rice = 0.1, White_Congee = 0.1, Noodles = 0.1, White_Steamed_Bread = 0.7, Deep_fried_dough_sticks = 0.5,
+  Fish_balls = 0.7, Cuttlefish_Balls = 1.9, Salted_Duck_Egg = 3.528, Century_Egg = 2.52, Pork_Floss = 8.2,
+  Ham_Sausage = 8.4, Chicken_Egg = 4.002, Duck_Egg = 3.306, Pork = 9.828, Pork_Chops = 8.5215, Beef = 4.1,
+  Mutton = 4.2, Rabbit_Meat = 0.75, Chicken = 1.953, Duck = 3.808, Pork_Tripe = 2.304, Pork_Liver = 2.1,
+  Pork_Trotters = 3.21, Pork_Blood = 0.1, Chicken_Gizzard = 1, Chicken_Wings = 3.864, Chicken_Feet = 2.28,
+  Grass_Carp = 0.58, Silver_Carp = 0.488, Crucian_Carp = 0.27, Perch = 0.464, Yellow_Croaker = 0.704,
+  Eel = 2.352, Sardine = 0.201, Black_Carp = 0.945, Mackerel = 3.136, Spanish_Mackerel = 0.432,
+  Pomfret = 1.47, Hairtail = 1.14, Mandarin_Fish = 0.549, Dike_Fish = 2.368, Bream = 0.708,
+  Horse_Mackerel = 0.42, Rice_Eel = 0.201, Squid = 1.228667, Crab = 0.3, Sea_Shrimp = 0.118, Clam = 0.078,
+  Oyster = 0.6, Razor_Clam = 0.057, Mussel = 0.294, Jellyfish = 0.1, Fresh_Milk_Boxed_Milk = 2.3,
+  Milk_Powder = 12, Yogurt = 1.6, Soy_Milk = 0.2, Breakfast_Milk_Breakfast_Drink = 2, Peanuts = 2.544,
+  Other_Nuts = 3.353906, Soybeans = 2.4, Mung_Beans = 0.2, Soybean_Milk = 0.8, Tofu = 2, Dried_Tofu = 3.6,
+  Tofu_Skin = 5.6, Tofu_Strips = 1.5, Fried_Tofu = 3, Soybean_Sprouts = 0.3, Dried_Shiitake = 0.095,
+  Dried_Scallop = 0.5, Dried_Fish = 0.6)
+  )
+
+  df$fatty_acid_monounsaturated <- calc_sparse_nutrient(
+c(rice = 0.1, Noodles = 0.066667, White_Steamed_Bread = 0.2, Deep_fried_dough_sticks = 7.5, Fish_balls = 0.4,
+  Cuttlefish_Balls = 1.8, Sweet_Potato = 0.086, Salted_Duck_Egg = 5.88, Century_Egg = 4.5, Pork_Floss = 13.1,
+  Ham_Sausage = 10.3, Chicken_Egg = 1.653, Duck_Egg = 4.872, Pork = 12.103, Pork_Chops = 8.763, Beef = 3.5,
+  Mutton = 2.4, Rabbit_Meat = 0.4, Chicken = 2.331, Duck = 6.324, Pork_Tripe = 1.728, Pork_Liver = 1.3,
+  Pork_Trotters = 5.25, Pork_Blood = 0.1, Chicken_Gizzard = 1, Chicken_Wings = 3.519, Chicken_Feet = 5.04,
+  Grass_Carp = 0.812, Silver_Carp = 0.61, Crucian_Carp = 0.432, Perch = 0.464, Yellow_Croaker = 0.864,
+  Eel = 2.688, Sardine = 0.201, Black_Carp = 0.819, Mackerel = 6.125, Spanish_Mackerel = 0.432,
+  Pomfret = 1.54, Hairtail = 0.988, Mandarin_Fish = 0.671, Dike_Fish = 1.472, Bream = 1.18,
+  Horse_Mackerel = 0.77, Rice_Eel = 0.268, Squid = 0.064667, Crab = 0.2, Sea_Shrimp = 0.118, Clam = 0.039,
+  Oyster = 0.3, Mussel = 0.147, Jellyfish = 0.1, Fresh_Milk_Boxed_Milk = 1, Milk_Powder = 6.2, Yogurt = 0.6,
+  Soy_Milk = 0.3, Breakfast_Milk_Breakfast_Drink = 0.8, Peanuts = 4.929, Other_Nuts = 14.819297,
+  Soybeans = 3.5, Mung_Beans = 0.1, Soybean_Milk = 0.5, Tofu = 1.8, Dried_Tofu = 4.2, Tofu_Skin = 6.5,
+  Tofu_Strips = 2.1, Fried_Tofu = 3, Soybean_Sprouts = 0.4, Wood_Ear_Mushroom = 0.1, Dried_Shiitake = 0.095,
+  Dried_Scallop = 1, Dried_Fish = 0.8)
+  )
+
+  df$fatty_acid_polyunsaturated <- calc_sparse_nutrient(
+c(rice = 0.1, White_Congee = 0.1, Noodles = 0.133333, Deep_fried_dough_sticks = 2.2, Fish_balls = 0.1,
+  Cuttlefish_Balls = 0.4, Sweet_Potato = 0.086, Century_Egg = 1.08, Pork_Floss = 2.3, Ham_Sausage = 2.2,
+  Chicken_Egg = 0.435, Duck_Egg = 0.957, Pork = 1.911, Pork_Chops = 0.828, Beef = 0.3, Mutton = 0.8,
+  Rabbit_Meat = 0.7, Chicken = 1.386, Duck = 2.448, Pork_Tripe = 0.384, Pork_Liver = 0.1,
+  Pork_Trotters = 1.05, Pork_Blood = 0.1, Chicken_Gizzard = 0.6, Chicken_Wings = 0.069, Chicken_Feet = 2.04,
+  Grass_Carp = 0.522, Silver_Carp = 0.305, Crucian_Carp = 0.27, Perch = 0.348, Yellow_Croaker = 0.128,
+  Eel = 1.176, Sardine = 0.201, Black_Carp = 0.252, Mackerel = 4.263, Spanish_Mackerel = 0.216,
+  Pomfret = 0.35, Hairtail = 0.304, Mandarin_Fish = 0.427, Dike_Fish = 1.728, Bream = 0.472,
+  Horse_Mackerel = 0.42, Rice_Eel = 0.134, Squid = 0.129333, Crab = 0.3, Sea_Shrimp = 0.118, Clam = 0.156,
+  Oyster = 0.5, Razor_Clam = 0.057, Mussel = 0.098, Fresh_Milk_Boxed_Milk = 0.1, Milk_Powder = 1.1,
+  Yogurt = 0.1, Soy_Milk = 0.9, Breakfast_Milk_Breakfast_Drink = 0.1, Peanuts = 4.929,
+  Other_Nuts = 11.788359, Soybeans = 9.1, Mung_Beans = 0.3, Soybean_Milk = 0.2, Tofu = 1.1, Dried_Tofu = 5.4,
+  Tofu_Skin = 9.2, Tofu_Strips = 6.1, Fried_Tofu = 10.4, Soybean_Sprouts = 0.7, Wood_Ear_Mushroom = 0.1,
+  Mushroom = 0.099, Shiitake_Mushroom = 0.2, Dried_Shiitake = 0.665, Dried_Scallop = 0.1, Dried_Fish = 0.9)
+  )
+
+  df$fatty_acid_unknown <- calc_sparse_nutrient(
+c(Deep_fried_dough_sticks = 1.5, Pork_Floss = 0.1, Ham_Sausage = 0.1, Chicken_Egg = 0.087, Duck_Egg = 0.261,
+  Pork = 0.455, Duck = 0.068, Pork_Trotters = 0.27, Grass_Carp = 0.232, Silver_Carp = 0.122, Perch = 0.058,
+  Yellow_Croaker = 0.032, Eel = 0.252, Sardine = 0.067, Black_Carp = 0.378, Spanish_Mackerel = 0.144,
+  Pomfret = 0.21, Hairtail = 0.152, Mandarin_Fish = 0.061, Dike_Fish = 0.192, Bream = 0.236,
+  Horse_Mackerel = 0.07, Rice_Eel = 0.067, Crab = 0.1, Oyster = 0.1, Fresh_Milk_Boxed_Milk = 0.1,
+  Milk_Powder = 0.9, Soy_Milk = 0.1, Breakfast_Milk_Breakfast_Drink = 0.1, Dried_Fish = 0.2)
+  )
+
+  df$SFA_total_pct <- calc_sparse_nutrient(
+c(rice = 36.9, White_Congee = 39.3, Noodles = 45.033333, White_Steamed_Bread = 75.3,
+  Deep_fried_dough_sticks = 4.4, Fish_balls = 59.4, Cuttlefish_Balls = 45.8, Sweet_Potato = 16.254,
+  Salted_Duck_Egg = 31.332, Century_Egg = 28.08, Pork_Floss = 34.5, Ham_Sausage = 39.9, Chicken_Egg = 56.376,
+  Duck_Egg = 30.363, Pork = 36.764, Pork_Chops = 32.3265, Beef = 51.7, Mutton = 56.8, Rabbit_Meat = 40.85,
+  Chicken = 21.798, Duck = 20.536, Pork_Tripe = 48.96, Pork_Liver = 58.7, Pork_Trotters = 19.65,
+  Pork_Blood = 49.4, Chicken_Gizzard = 39.4, Chicken_Wings = 35.673, Chicken_Feet = 14.88,
+  Grass_Carp = 15.66, Silver_Carp = 19.276, Crucian_Carp = 15.66, Perch = 19.72, Yellow_Croaker = 25.856,
+  Eel = 30.66, Sardine = 23.115, Black_Carp = 24.885, Mackerel = 11.319, Spanish_Mackerel = 27.288,
+  Pomfret = 28.28, Hairtail = 34.124, Mandarin_Fish = 18.605, Dike_Fish = 26.112, Bream = 15.458,
+  Horse_Mackerel = 18.41, Rice_Eel = 21.105, Squid = 63.502667, Crab = 34.1, Sea_Shrimp = 22.007,
+  Clam = 10.53, Oyster = 37.2, Razor_Clam = 24.681, Mussel = 25.48, Jellyfish = 69.35,
+  Fresh_Milk_Boxed_Milk = 64.4, Milk_Powder = 59.5, Yogurt = 70.7, Soy_Milk = 11.6,
+  Breakfast_Milk_Breakfast_Drink = 65.9, Peanuts = 10.494, Other_Nuts = 8.732578, Soybeans = 16,
+  Mung_Beans = 32, Soybean_Milk = 51.3, Tofu = 33.8, Dried_Tofu = 20.4, Tofu_Skin = 26.1, Tofu_Strips = 15.8,
+  Fried_Tofu = 18.6, Soybean_Sprouts = 19.9, Mung_Bean_Sprouts = 30.4, Wood_Ear_Mushroom = 23.1,
+  Mushroom = 23.265, Shiitake_Mushroom = 13.2, Dried_Shiitake = 12.54, Dried_Scallop = 31.7, Dried_Fish = 26)
+  )
+
+  df$FA_4_0 <- calc_sparse_nutrient(
+c(Fresh_Milk_Boxed_Milk = 2, Breakfast_Milk_Breakfast_Drink = 2)
+  )
+
+  df$FA_6_0 <- calc_sparse_nutrient(
+c(Fresh_Milk_Boxed_Milk = 1.7, Milk_Powder = 0.3, Yogurt = 0.2, Breakfast_Milk_Breakfast_Drink = 1.6)
+  )
+
+  df$FA_8_0 <- calc_sparse_nutrient(
+c(Chicken_Egg = 0.174, Sea_Shrimp = 0.059, Fresh_Milk_Boxed_Milk = 1.1, Milk_Powder = 0.5, Yogurt = 0.3,
+  Breakfast_Milk_Breakfast_Drink = 1.1)
+  )
+
+  df$FA_10_0 <- calc_sparse_nutrient(
+c(Fish_balls = 1.3, Cuttlefish_Balls = 0.1, Pork_Trotters = 0.03, Sea_Shrimp = 0.059,
+  Fresh_Milk_Boxed_Milk = 2.6, Milk_Powder = 2, Yogurt = 1.4, Breakfast_Milk_Breakfast_Drink = 2.5,
+  Other_Nuts = 0.012422, Soybean_Milk = 0.2, Dried_Tofu = 2.3)
+  )
+
+  df$FA_11_0 <- calc_sparse_nutrient(
+c(Chicken_Egg = 0.174, Rabbit_Meat = 0.4, Silver_Carp = 0.061, Hairtail = 0.076, Milk_Powder = 0.1)
+  )
+
+  df$FA_12_0 <- calc_sparse_nutrient(
+c(rice = 1.6, White_Congee = 2.3, Noodles = 1.366667, White_Steamed_Bread = 1.6, Fish_balls = 0.8,
+  Cuttlefish_Balls = 0.1, Sweet_Potato = 1.204, Ham_Sausage = 0.1, Chicken_Egg = 0.087, Pork = 0.546,
+  Pork_Chops = 0.069, Pork_Liver = 0.5, Pork_Trotters = 0.18, Chicken_Gizzard = 0.1, Silver_Carp = 0.061,
+  Crucian_Carp = 0.054, Yellow_Croaker = 0.096, Sardine = 2.211, Spanish_Mackerel = 0.396, Pomfret = 0.77,
+  Hairtail = 0.532, Mandarin_Fish = 0.061, Dike_Fish = 2.496, Bream = 0.059, Horse_Mackerel = 0.07,
+  Rice_Eel = 0.134, Crab = 0.1, Sea_Shrimp = 0.059, Mussel = 0.147, Jellyfish = 0.9,
+  Fresh_Milk_Boxed_Milk = 3.1, Milk_Powder = 3.9, Yogurt = 8.6, Breakfast_Milk_Breakfast_Drink = 3.1,
+  Mung_Beans = 0.2, Soybean_Milk = 0.2, Dried_Scallop = 1.3)
+  )
+
+  df$FA_13_0 <- calc_sparse_nutrient(
+c(Fresh_Milk_Boxed_Milk = 0.2, Breakfast_Milk_Breakfast_Drink = 0.2, Shiitake_Mushroom = 0.1,
+  Dried_Shiitake = 0.095)
+  )
+
+  df$FA_14_0 <- calc_sparse_nutrient(
+c(rice = 0.9, White_Congee = 0.8, Noodles = 0.8, White_Steamed_Bread = 0.5, Fish_balls = 2,
+  Cuttlefish_Balls = 2.1, Salted_Duck_Egg = 0.336, Century_Egg = 0.45, Pork_Floss = 1, Ham_Sausage = 2.2,
+  Chicken_Egg = 8.352, Duck_Egg = 0.261, Pork = 1.365, Pork_Chops = 1.2075, Beef = 3.7, Mutton = 3.7,
+  Rabbit_Meat = 1.4, Chicken = 0.567, Duck = 0.408, Pork_Tripe = 1.248, Pork_Liver = 1.8,
+  Pork_Trotters = 0.81, Pork_Blood = 0.8, Chicken_Gizzard = 0.6, Chicken_Wings = 0.69, Chicken_Feet = 0.3,
+  Grass_Carp = 0.754, Silver_Carp = 2.013, Crucian_Carp = 1.296, Perch = 1.682, Yellow_Croaker = 2.848,
+  Eel = 2.772, Sardine = 2.211, Black_Carp = 1.638, Mackerel = 4.459, Spanish_Mackerel = 1.44,
+  Pomfret = 2.66, Hairtail = 4.028, Mandarin_Fish = 1.525, Bream = 1.239, Horse_Mackerel = 1.61,
+  Rice_Eel = 1.943, Squid = 1.713667, Crab = 2.5, Sea_Shrimp = 0.826, Clam = 0.468, Oyster = 5.4,
+  Razor_Clam = 3.477, Mussel = 4.263, Jellyfish = 4.55, Fresh_Milk_Boxed_Milk = 10.1, Milk_Powder = 11.6,
+  Yogurt = 15.8, Soy_Milk = 0.4, Breakfast_Milk_Breakfast_Drink = 10.1, Peanuts = 0.053,
+  Other_Nuts = 0.024844, Soybeans = 0.1, Mung_Beans = 0.3, Soybean_Milk = 0.2, Tofu = 0.3, Dried_Tofu = 0.8,
+  Tofu_Skin = 0.3, Tofu_Strips = 0.1, Fried_Tofu = 0.2, Mung_Bean_Sprouts = 0.4, Wood_Ear_Mushroom = 0.5,
+  Mushroom = 0.495, Shiitake_Mushroom = 0.2, Dried_Shiitake = 0.19, Dried_Fish = 1.6)
+  )
+
+  df$FA_15_0 <- calc_sparse_nutrient(
+c(Cuttlefish_Balls = 0.2, Century_Egg = 0.09, Chicken_Egg = 8.004, Beef = 0.9, Mutton = 0.3,
+  Rabbit_Meat = 0.45, Chicken = 0.063, Duck = 0.068, Chicken_Gizzard = 0.1, Chicken_Wings = 0.207,
+  Chicken_Feet = 0.3, Grass_Carp = 0.116, Silver_Carp = 0.549, Crucian_Carp = 0.378, Perch = 0.348,
+  Yellow_Croaker = 0.192, Sardine = 0.201, Black_Carp = 0.756, Spanish_Mackerel = 0.468, Pomfret = 0.49,
+  Hairtail = 0.38, Mandarin_Fish = 0.549, Bream = 0.413, Horse_Mackerel = 0.49, Rice_Eel = 0.871,
+  Squid = 0.226333, Crab = 0.8, Sea_Shrimp = 0.354, Clam = 0.273, Oyster = 0.7, Razor_Clam = 0.684,
+  Mussel = 0.392, Jellyfish = 0.9, Fresh_Milk_Boxed_Milk = 1.1, Milk_Powder = 1.6, Yogurt = 1.3,
+  Breakfast_Milk_Breakfast_Drink = 1, Mushroom = 0.495, Shiitake_Mushroom = 0.7, Dried_Shiitake = 0.665,
+  Dried_Scallop = 0.5, Dried_Fish = 0.3)
+  )
+
+  df$FA_16_0 <- calc_sparse_nutrient(
+c(rice = 32.2, White_Congee = 33.2, Noodles = 38.1, White_Steamed_Bread = 66.8,
+  Deep_fried_dough_sticks = 3.1, Fish_balls = 47.5, Cuttlefish_Balls = 39.2, Sweet_Potato = 11.18,
+  Salted_Duck_Egg = 30.324, Century_Egg = 21.78, Pork_Floss = 22.8, Ham_Sausage = 24, Chicken_Egg = 8.874,
+  Duck_Egg = 23.751, Pork = 22.659, Pork_Chops = 19.665, Beef = 27, Mutton = 26.5, Rabbit_Meat = 24.55,
+  Chicken = 15.624, Duck = 14.756, Pork_Tripe = 28.512, Pork_Liver = 34, Pork_Trotters = 13.05,
+  Pork_Blood = 23.1, Chicken_Gizzard = 25, Chicken_Wings = 28.083, Chicken_Feet = 10.92, Grass_Carp = 11.716,
+  Silver_Carp = 12.688, Crucian_Carp = 10.638, Perch = 13.804, Yellow_Croaker = 18.464, Eel = 21.756,
+  Sardine = 12.998, Black_Carp = 15.75, Mackerel = 6.125, Spanish_Mackerel = 17.676, Pomfret = 19.32,
+  Hairtail = 22.344, Mandarin_Fish = 13.298, Dike_Fish = 17.728, Bream = 10.856, Horse_Mackerel = 12.18,
+  Rice_Eel = 13.869, Squid = 46.721667, Crab = 20.1, Sea_Shrimp = 15.576, Clam = 8.736, Oyster = 22.7,
+  Razor_Clam = 15.048, Mussel = 16.611, Jellyfish = 45.5, Fresh_Milk_Boxed_Milk = 30.2, Milk_Powder = 28.2,
+  Yogurt = 33.5, Soy_Milk = 10.3, Breakfast_Milk_Breakfast_Drink = 31, Peanuts = 6.572,
+  Other_Nuts = 6.832031, Soybeans = 10.8, Mung_Beans = 23.6, Soybean_Milk = 40.3, Tofu = 25.2,
+  Dried_Tofu = 14.6, Tofu_Skin = 21.1, Tofu_Strips = 11.7, Fried_Tofu = 16.5, Soybean_Sprouts = 13.6,
+  Mung_Bean_Sprouts = 19.1, Wood_Ear_Mushroom = 17.6, Mushroom = 14.157, Shiitake_Mushroom = 11.2,
+  Dried_Shiitake = 10.64, Dried_Scallop = 18.8, Dried_Fish = 16.4)
+  )
+
+  df$FA_17_0 <- calc_sparse_nutrient(
+c(Century_Egg = 0.36, Pork_Floss = 0.2, Ham_Sausage = 0.3, Chicken_Egg = 14.355, Pork = 0.455, Beef = 0.6,
+  Mutton = 0.8, Rabbit_Meat = 0.25, Chicken = 0.063, Duck = 0.136, Grass_Carp = 1.682, Silver_Carp = 0.061,
+  Crucian_Carp = 0.108, Perch = 0.406, Yellow_Croaker = 0.192, Sardine = 0.536, Black_Carp = 0.315,
+  Spanish_Mackerel = 0.324, Pomfret = 0.07, Hairtail = 0.532, Dike_Fish = 1.344, Bream = 0.059,
+  Rice_Eel = 0.268, Squid = 0.582, Sea_Shrimp = 0.472, Oyster = 1.6, Razor_Clam = 0.171, Mussel = 0.196,
+  Jellyfish = 1.4, Fresh_Milk_Boxed_Milk = 0.7, Milk_Powder = 0.1, Yogurt = 0.2,
+  Breakfast_Milk_Breakfast_Drink = 0.6, Wood_Ear_Mushroom = 0.4, Dried_Scallop = 2.2, Dried_Fish = 1.1)
+  )
+
+  df$FA_18_0 <- calc_sparse_nutrient(
+c(rice = 2.2, White_Congee = 3, Noodles = 4.766667, White_Steamed_Bread = 6.4, Deep_fried_dough_sticks = 1,
+  Fish_balls = 7.8, Cuttlefish_Balls = 4.1, Sweet_Potato = 3.87, Salted_Duck_Egg = 0.672, Century_Egg = 4.86,
+  Pork_Floss = 10.5, Ham_Sausage = 13.2, Chicken_Egg = 15.747, Duck_Egg = 6.09, Pork = 11.466,
+  Pork_Chops = 11.385, Beef = 19.5, Mutton = 24.9, Rabbit_Meat = 13.8, Chicken = 4.536, Duck = 4.216,
+  Pork_Tripe = 18.816, Pork_Liver = 22.4, Pork_Trotters = 5.46, Pork_Blood = 23.3, Chicken_Gizzard = 13.6,
+  Chicken_Wings = 6.693, Chicken_Feet = 3.36, Grass_Carp = 0.116, Silver_Carp = 2.928, Crucian_Carp = 2.592,
+  Perch = 3.48, Yellow_Croaker = 3.712, Eel = 3.78, Sardine = 4.02, Black_Carp = 4.914, Mackerel = 0.735,
+  Spanish_Mackerel = 6.372, Pomfret = 4.69, Hairtail = 6.004, Mandarin_Fish = 2.928, Dike_Fish = 4.544,
+  Bream = 2.183, Horse_Mackerel = 2.73, Rice_Eel = 3.752, Squid = 14.065, Crab = 9.8, Sea_Shrimp = 4.425,
+  Clam = 1.053, Oyster = 4.6, Razor_Clam = 4.788, Mussel = 2.842, Jellyfish = 15.9,
+  Fresh_Milk_Boxed_Milk = 11.3, Milk_Powder = 10.8, Yogurt = 9.3, Breakfast_Milk_Breakfast_Drink = 12.4,
+  Peanuts = 1.961, Other_Nuts = 1.739063, Soybeans = 3.4, Mung_Beans = 5.5, Soybean_Milk = 10.4, Tofu = 7.8,
+  Dried_Tofu = 3.6, Tofu_Skin = 4.7, Tofu_Strips = 2.4, Fried_Tofu = 1.9, Soybean_Sprouts = 5,
+  Mung_Bean_Sprouts = 7.3, Wood_Ear_Mushroom = 4.6, Mushroom = 3.465, Shiitake_Mushroom = 1,
+  Dried_Shiitake = 0.95, Dried_Scallop = 7.6, Dried_Fish = 6.5)
+  )
+
+  df$FA_19_0 <- calc_sparse_nutrient(
+c(Deep_fried_dough_sticks = 0.3, Chicken_Egg = 0.522, Chicken = 0.252, Pork_Trotters = 0.03,
+  Grass_Carp = 1.16, Silver_Carp = 0.122, Crucian_Carp = 0.054, Yellow_Croaker = 0.032, Eel = 2.352,
+  Pomfret = 0.07, Bream = 0.118, Rice_Eel = 0.067, Oyster = 0.4, Razor_Clam = 0.342, Mussel = 0.196,
+  Yogurt = 0.1, Tofu = 0.5, Dried_Tofu = 0.6, Tofu_Strips = 0.2)
+  )
+
+  df$FA_20_0 <- calc_sparse_nutrient(
+c(Century_Egg = 0.54, Ham_Sausage = 0.1, Duck_Egg = 0.174, Pork = 0.273, Mutton = 0.6, Chicken = 0.504,
+  Duck = 0.952, Pork_Tripe = 0.384, Pork_Trotters = 0.09, Pork_Blood = 0.9, Silver_Carp = 0.793,
+  Crucian_Carp = 0.324, Yellow_Croaker = 0.256, Sardine = 0.402, Black_Carp = 1.512,
+  Spanish_Mackerel = 0.504, Pomfret = 0.21, Hairtail = 0.228, Mandarin_Fish = 0.244, Bream = 0.413,
+  Horse_Mackerel = 0.98, Rice_Eel = 0.134, Squid = 0.064667, Crab = 0.5, Sea_Shrimp = 0.177, Oyster = 1.8,
+  Razor_Clam = 0.171, Mussel = 0.833, Jellyfish = 0.2, Fresh_Milk_Boxed_Milk = 0.2, Milk_Powder = 0.3,
+  Soy_Milk = 0.3, Breakfast_Milk_Breakfast_Drink = 0.2, Peanuts = 0.53, Other_Nuts = 0.124219,
+  Soybeans = 1.4, Mung_Beans = 1.3, Tofu = 0.1, Dried_Tofu = 0.5, Tofu_Strips = 1.4, Soybean_Sprouts = 0.5,
+  Mung_Bean_Sprouts = 0.9, Dried_Scallop = 1.3, Dried_Fish = 0.1)
+  )
+
+  df$FA_22_0 <- calc_sparse_nutrient(
+c(Duck_Egg = 0.087, Chicken = 0.189, Pork_Blood = 1.3, Crucian_Carp = 0.216, Yellow_Croaker = 0.064,
+  Sardine = 0.536, Spanish_Mackerel = 0.108, Bream = 0.118, Horse_Mackerel = 0.35, Rice_Eel = 0.067,
+  Squid = 0.064667, Crab = 0.3, Fresh_Milk_Boxed_Milk = 0.1, Milk_Powder = 0.1, Soy_Milk = 0.6,
+  Breakfast_Milk_Breakfast_Drink = 0.1, Peanuts = 1.378, Soybeans = 0.3, Mung_Beans = 1.1, Dried_Tofu = 0.7,
+  Soybean_Sprouts = 0.8, Mung_Bean_Sprouts = 2.7, Mushroom = 4.653)
+  )
+
+  df$FA_24_0 <- calc_sparse_nutrient(
+c(Squid = 0.064667)
+  )
+
+  df$MUFA_total_pct <- calc_sparse_nutrient(
+c(rice = 20.6, White_Congee = 21.7, Noodles = 19.966667, White_Steamed_Bread = 21.3,
+  Deep_fried_dough_sticks = 63.8, Fish_balls = 32.4, Cuttlefish_Balls = 43.7, Sweet_Potato = 25.198,
+  Salted_Duck_Egg = 52.584, Century_Egg = 50.76, Pork_Floss = 55.4, Ham_Sausage = 49, Chicken_Egg = 23.49,
+  Duck_Egg = 44.979, Pork = 45.409, Pork_Chops = 33.3615, Beef = 44.3, Mutton = 32.5, Rabbit_Meat = 21.75,
+  Chicken = 26.019, Duck = 34, Pork_Tripe = 37.824, Pork_Liver = 37.9, Pork_Trotters = 32.43,
+  Pork_Blood = 29.2, Chicken_Gizzard = 39.2, Chicken_Wings = 32.361, Chicken_Feet = 32.4,
+  Grass_Carp = 22.852, Silver_Carp = 23.79, Crucian_Carp = 23.274, Perch = 19.662, Yellow_Croaker = 30.112,
+  Eel = 34.944, Sardine = 16.75, Black_Carp = 21.609, Mackerel = 22.197, Spanish_Mackerel = 23.292,
+  Pomfret = 30.87, Hairtail = 28.272, Mandarin_Fish = 24.095, Dike_Fish = 16.704, Bream = 26.491,
+  Horse_Mackerel = 30.66, Rice_Eel = 29.748, Squid = 14.647, Crab = 27.4, Sea_Shrimp = 15.694, Clam = 7.566,
+  Oyster = 21.9, Razor_Clam = 10.545, Mussel = 13.328, Jellyfish = 27.4, Fresh_Milk_Boxed_Milk = 28.5,
+  Milk_Powder = 30.8, Yogurt = 26.1, Soy_Milk = 22.8, Breakfast_Milk_Breakfast_Drink = 26.9,
+  Peanuts = 20.458, Other_Nuts = 32.880703, Soybeans = 23.4, Mung_Beans = 12, Soybean_Milk = 36.6,
+  Tofu = 32.3, Dried_Tofu = 26.2, Tofu_Skin = 30.6, Tofu_Strips = 21.3, Fried_Tofu = 18.1,
+  Soybean_Sprouts = 28.7, Mung_Bean_Sprouts = 15.6, Wood_Ear_Mushroom = 32.1, Mushroom = 3.861,
+  Shiitake_Mushroom = 12.1, Dried_Shiitake = 11.495, Dried_Scallop = 56.9, Dried_Fish = 31.4)
+  )
+
+  df$FA_14_1 <- calc_sparse_nutrient(
+c(Beef = 0.4, Mutton = 0.3, Grass_Carp = 0.116, Silver_Carp = 0.427, Sardine = 0.402, Black_Carp = 0.126,
+  Spanish_Mackerel = 0.036, Pomfret = 0.21, Hairtail = 0.152, Dike_Fish = 0.576, Sea_Shrimp = 0.059,
+  Fresh_Milk_Boxed_Milk = 0.8, Milk_Powder = 0.2, Yogurt = 0.3, Breakfast_Milk_Breakfast_Drink = 0.8)
+  )
+
+  df$FA_15_1 <- calc_sparse_nutrient(
+c(Rabbit_Meat = 0.05, Perch = 0.116, Yellow_Croaker = 0.032, Sardine = 0.067, Black_Carp = 0.252,
+  Spanish_Mackerel = 0.036, Pomfret = 0.07, Mandarin_Fish = 0.549, Rice_Eel = 0.067, Oyster = 0.1,
+  Razor_Clam = 0.057, Yogurt = 0.1)
+  )
+
+  df$FA_16_1 <- calc_sparse_nutrient(
+c(rice = 0.5, Noodles = 0.533333, White_Steamed_Bread = 0.8, Deep_fried_dough_sticks = 0.3,
+  Century_Egg = 3.15, Pork_Floss = 2.2, Ham_Sausage = 2.8, Chicken_Egg = 3.654, Duck_Egg = 3.132,
+  Pork = 3.64, Pork_Chops = 1.9665, Beef = 4.7, Mutton = 2.1, Rabbit_Meat = 2, Chicken = 2.961, Duck = 3.604,
+  Pork_Tripe = 1.344, Pork_Liver = 4.8, Pork_Trotters = 2.52, Pork_Blood = 3.5, Chicken_Gizzard = 3.7,
+  Chicken_Wings = 5.244, Chicken_Feet = 9.24, Grass_Carp = 3.828, Silver_Carp = 7.442, Crucian_Carp = 4.752,
+  Perch = 7.076, Yellow_Croaker = 12.16, Eel = 5.796, Sardine = 6.7, Black_Carp = 5.166, Mackerel = 2.058,
+  Spanish_Mackerel = 5.94, Pomfret = 5.67, Hairtail = 6.156, Mandarin_Fish = 7.015, Dike_Fish = 3.2,
+  Bream = 4.956, Horse_Mackerel = 9.24, Rice_Eel = 12.462, Squid = 0.226333, Crab = 9.8, Sea_Shrimp = 2.832,
+  Clam = 0.546, Oyster = 6.2, Razor_Clam = 4.959, Mussel = 8.624, Jellyfish = 7.2,
+  Fresh_Milk_Boxed_Milk = 1.8, Milk_Powder = 3.4, Yogurt = 1.5, Breakfast_Milk_Breakfast_Drink = 1.7,
+  Peanuts = 0.053, Other_Nuts = 0.347812, Soybeans = 0.2, Tofu = 0.5, Dried_Tofu = 0.4, Tofu_Skin = 2,
+  Tofu_Strips = 0.1, Soybean_Sprouts = 0.8, Mung_Bean_Sprouts = 0.9, Wood_Ear_Mushroom = 0.7,
+  Shiitake_Mushroom = 3, Dried_Shiitake = 2.85, Dried_Scallop = 3.2, Dried_Fish = 6.1)
+  )
+
+  df$FA_17_1 <- calc_sparse_nutrient(
+c(Century_Egg = 0.27, Pork_Floss = 0.2, Chicken_Egg = 4.35, Beef = 0.3, Mutton = 0.3, Rabbit_Meat = 0.1,
+  Grass_Carp = 0.174, Silver_Carp = 0.244, Crucian_Carp = 0.108, Yellow_Croaker = 0.192, Sardine = 0.67,
+  Black_Carp = 0.378, Spanish_Mackerel = 0.288, Pomfret = 0.56, Hairtail = 0.304, Bream = 0.059,
+  Horse_Mackerel = 0.84, Rice_Eel = 0.469, Sea_Shrimp = 0.059, Oyster = 1.7, Mussel = 0.049,
+  Jellyfish = 1.05, Fresh_Milk_Boxed_Milk = 0.2, Yogurt = 0.1, Breakfast_Milk_Breakfast_Drink = 0.2,
+  Dried_Scallop = 2.5, Dried_Fish = 1.3)
+  )
+
+  df$FA_18_1 <- calc_sparse_nutrient(
+c(rice = 20.1, White_Congee = 21.7, Noodles = 19.433333, White_Steamed_Bread = 20.5,
+  Deep_fried_dough_sticks = 13.6, Fish_balls = 32.4, Cuttlefish_Balls = 43.7, Sweet_Potato = 25.198,
+  Salted_Duck_Egg = 52.584, Century_Egg = 46.17, Pork_Floss = 53, Ham_Sausage = 46.1, Chicken_Egg = 15.486,
+  Duck_Egg = 41.586, Pork = 41.678, Pork_Chops = 31.395, Beef = 38.9, Mutton = 29.7, Rabbit_Meat = 19.6,
+  Chicken = 22.995, Duck = 30.396, Pork_Tripe = 36.288, Pork_Liver = 33.1, Pork_Trotters = 29.79,
+  Pork_Blood = 25.5, Chicken_Gizzard = 35.5, Chicken_Wings = 27.117, Chicken_Feet = 23.16,
+  Grass_Carp = 18.502, Silver_Carp = 15.372, Crucian_Carp = 16.308, Perch = 12.47, Yellow_Croaker = 17.632,
+  Eel = 28.308, Sardine = 7.705, Black_Carp = 15.687, Mackerel = 5.243, Spanish_Mackerel = 16.776,
+  Pomfret = 23.31, Hairtail = 20.976, Mandarin_Fish = 14.579, Dike_Fish = 12.928, Bream = 21.063,
+  Horse_Mackerel = 20.37, Rice_Eel = 16.281, Squid = 13.871, Crab = 15.8, Sea_Shrimp = 12.272, Clam = 7.02,
+  Oyster = 10.8, Razor_Clam = 3.99, Mussel = 3.234, Jellyfish = 18.45, Fresh_Milk_Boxed_Milk = 25.6,
+  Milk_Powder = 27.2, Yogurt = 24.1, Soy_Milk = 22.8, Breakfast_Milk_Breakfast_Drink = 24.1,
+  Peanuts = 20.352, Other_Nuts = 32.532891, Soybeans = 23.2, Mung_Beans = 12, Soybean_Milk = 36.6,
+  Tofu = 29.6, Dried_Tofu = 25.6, Tofu_Skin = 28.6, Tofu_Strips = 21.2, Fried_Tofu = 18.1,
+  Soybean_Sprouts = 27.9, Mung_Bean_Sprouts = 14.2, Wood_Ear_Mushroom = 30.7, Mushroom = 3.861,
+  Shiitake_Mushroom = 9.1, Dried_Shiitake = 8.645, Dried_Scallop = 38.6, Dried_Fish = 18.2)
+  )
+
+  df$FA_20_1 <- calc_sparse_nutrient(
+c(Ham_Sausage = 0.1, Pork = 0.091, Pork_Tripe = 0.192, Pork_Trotters = 0.06, Grass_Carp = 0.116,
+  Crucian_Carp = 0.918, Yellow_Croaker = 0.096, Eel = 0.252, Mackerel = 5.635, Pomfret = 0.42,
+  Hairtail = 0.228, Mandarin_Fish = 0.244, Bream = 0.177, Rice_Eel = 0.201, Squid = 0.388,
+  Sea_Shrimp = 0.472, Oyster = 3.1, Razor_Clam = 1.539, Mussel = 1.078, Jellyfish = 0.7,
+  Fresh_Milk_Boxed_Milk = 0.1, Breakfast_Milk_Breakfast_Drink = 0.1, Peanuts = 0.053,
+  Wood_Ear_Mushroom = 0.7, Dried_Scallop = 2.1, Dried_Fish = 5.8)
+  )
+
+  df$FA_22_1 <- calc_sparse_nutrient(
+c(Deep_fried_dough_sticks = 49.9, Century_Egg = 1.17, Duck_Egg = 0.261, Mutton = 0.1, Chicken = 0.063,
+  Pork_Trotters = 0.06, Pork_Blood = 0.2, Grass_Carp = 0.116, Silver_Carp = 0.305, Crucian_Carp = 1.188,
+  Eel = 0.588, Sardine = 1.206, Mackerel = 9.261, Spanish_Mackerel = 0.216, Pomfret = 0.63, Hairtail = 0.456,
+  Mandarin_Fish = 1.708, Bream = 0.236, Horse_Mackerel = 0.21, Rice_Eel = 0.268, Squid = 0.097, Crab = 1.8,
+  Mussel = 0.343, Tofu = 2.2, Dried_Tofu = 1.2, Mung_Bean_Sprouts = 0.5, Dried_Scallop = 10.5)
+  )
+
+  df$FA_24_1 <- calc_sparse_nutrient(
+c(Squid = 0.064667)
+  )
+
+  df$PUFA_total_pct <- calc_sparse_nutrient(
+c(rice = 42.6, White_Congee = 38.9, Noodles = 34.733333, White_Steamed_Bread = 3.3,
+  Deep_fried_dough_sticks = 19, Fish_balls = 8.2, Cuttlefish_Balls = 10.6, Sweet_Potato = 26.574,
+  Century_Egg = 11.7, Pork_Floss = 9.6, Ham_Sausage = 10.4, Chicken_Egg = 6.351, Duck_Egg = 8.874,
+  Pork = 7.189, Pork_Chops = 3.0705, Beef = 3.7, Mutton = 10.7, Rabbit_Meat = 36.9, Chicken = 15.687,
+  Duck = 13.26, Pork_Tripe = 8.256, Pork_Liver = 3.2, Pork_Trotters = 6.3, Pork_Blood = 17.7,
+  Chicken_Gizzard = 21.7, Chicken_Wings = 0.828, Chicken_Feet = 13.14, Grass_Carp = 13.688,
+  Silver_Carp = 11.895, Crucian_Carp = 13.662, Perch = 15.196, Yellow_Croaker = 6.112, Eel = 15.288,
+  Sardine = 21.038, Black_Carp = 6.93, Mackerel = 15.484, Spanish_Mackerel = 14.112, Pomfret = 6.72,
+  Hairtail = 9.728, Mandarin_Fish = 15.25, Dike_Fish = 19.008, Bream = 11.151, Horse_Mackerel = 17.22,
+  Rice_Eel = 11.055, Squid = 18.947333, Crab = 31.7, Sea_Shrimp = 17.818, Clam = 21.138, Oyster = 34.6,
+  Razor_Clam = 19.152, Mussel = 9.31, Jellyfish = 1.15, Fresh_Milk_Boxed_Milk = 4.1, Milk_Powder = 5.3,
+  Yogurt = 2.5, Soy_Milk = 61.7, Breakfast_Milk_Breakfast_Drink = 3.7, Peanuts = 20.458,
+  Other_Nuts = 33.029766, Soybeans = 61.1, Mung_Beans = 55, Soybean_Milk = 10.2, Tofu = 32.3,
+  Dried_Tofu = 53.6, Tofu_Skin = 43.2, Tofu_Strips = 62.5, Fried_Tofu = 63.3, Soybean_Sprouts = 51.1,
+  Mung_Bean_Sprouts = 48.6, Wood_Ear_Mushroom = 44.8, Mushroom = 70.191, Shiitake_Mushroom = 74.5,
+  Dried_Shiitake = 70.775, Dried_Scallop = 8.5, Dried_Fish = 35.7)
+  )
+
+  df$FA_16_2 <- calc_sparse_nutrient(
+c(Pork = 0.182, Beef = 0.2, Mutton = 1.2, Chicken = 0.63, Pork_Trotters = 0.15, Yellow_Croaker = 0.032,
+  Razor_Clam = 0.627, Milk_Powder = 0.6)
+  )
+
+  df$FA_18_2 <- calc_sparse_nutrient(
+c(rice = 39.4, White_Congee = 38.9, Noodles = 33.233333, White_Steamed_Bread = 3.3,
+  Deep_fried_dough_sticks = 12.5, Fish_balls = 6.8, Cuttlefish_Balls = 10.6, Sweet_Potato = 26.574,
+  Century_Egg = 9.09, Pork_Floss = 7.5, Ham_Sausage = 9.6, Chicken_Egg = 4.611, Duck_Egg = 7.221,
+  Pork = 5.187, Pork_Chops = 1.587, Beef = 2.9, Mutton = 7.2, Rabbit_Meat = 25.65, Chicken = 13.545,
+  Duck = 12.648, Pork_Tripe = 7.392, Pork_Liver = 2.8, Pork_Trotters = 5.76, Pork_Blood = 17.7,
+  Chicken_Gizzard = 20.5, Chicken_Wings = 0.828, Chicken_Feet = 12.54, Grass_Carp = 9.86,
+  Silver_Carp = 5.551, Crucian_Carp = 8.37, Perch = 1.16, Yellow_Croaker = 1.216, Eel = 1.596,
+  Sardine = 1.407, Black_Carp = 3.717, Mackerel = 0.735, Spanish_Mackerel = 1.08, Pomfret = 0.63,
+  Hairtail = 1.064, Mandarin_Fish = 4.636, Dike_Fish = 0.256, Bream = 5.9, Horse_Mackerel = 4.41,
+  Rice_Eel = 5.226, Squid = 0.064667, Crab = 1.8, Sea_Shrimp = 5.31, Clam = 17.667, Oyster = 2.1,
+  Razor_Clam = 0.741, Mussel = 1.029, Jellyfish = 0.45, Fresh_Milk_Boxed_Milk = 3.6, Milk_Powder = 3.6,
+  Yogurt = 1.9, Soy_Milk = 52.1, Breakfast_Milk_Breakfast_Drink = 3.3, Peanuts = 19.981,
+  Other_Nuts = 28.694531, Soybeans = 52.9, Mung_Beans = 40.7, Soybean_Milk = 10.2, Tofu = 29.2,
+  Dried_Tofu = 46.3, Tofu_Skin = 39.4, Tofu_Strips = 54, Fried_Tofu = 56.5, Soybean_Sprouts = 46.1,
+  Mung_Bean_Sprouts = 17.9, Wood_Ear_Mushroom = 41, Mushroom = 69.003, Shiitake_Mushroom = 60.2,
+  Dried_Shiitake = 57.19, Dried_Scallop = 6.3, Dried_Fish = 0.7)
+  )
+
+  df$FA_18_3 <- calc_sparse_nutrient(
+c(rice = 3.2, Noodles = 2.25, Deep_fried_dough_sticks = 6.5, Fish_balls = 1.4, Century_Egg = 1.17,
+  Pork_Floss = 1.8, Ham_Sausage = 0.7, Duck_Egg = 0.522, Pork = 1.547, Pork_Chops = 1.4835, Beef = 0.5,
+  Mutton = 1.5, Rabbit_Meat = 6.35, Chicken = 1.323, Duck = 0.612, Pork_Tripe = 0.384, Pork_Liver = 0.4,
+  Pork_Trotters = 0.27, Chicken_Gizzard = 1.2, Chicken_Feet = 0.6, Grass_Carp = 2.726, Silver_Carp = 4.453,
+  Crucian_Carp = 2.754, Perch = 1.798, Yellow_Croaker = 1.28, Eel = 3.444, Sardine = 6.365,
+  Black_Carp = 1.197, Mackerel = 0.931, Spanish_Mackerel = 1.584, Pomfret = 3.08, Hairtail = 1.368,
+  Mandarin_Fish = 10.614, Dike_Fish = 2.112, Bream = 2.36, Horse_Mackerel = 2.45, Rice_Eel = 3.283,
+  Crab = 2.1, Sea_Shrimp = 2.478, Clam = 3.471, Oyster = 7.8, Razor_Clam = 2.223, Mussel = 1.47,
+  Fresh_Milk_Boxed_Milk = 0.4, Milk_Powder = 0.9, Yogurt = 0.6, Soy_Milk = 9.6,
+  Breakfast_Milk_Breakfast_Drink = 0.3, Peanuts = 0.477, Other_Nuts = 4.335234, Soybeans = 8.2,
+  Mung_Beans = 14.3, Tofu = 3.1, Dried_Tofu = 7.2, Tofu_Skin = 3.8, Tofu_Strips = 8.5, Fried_Tofu = 6.8,
+  Soybean_Sprouts = 5, Mung_Bean_Sprouts = 23.7, Wood_Ear_Mushroom = 3.8, Mushroom = 1.188,
+  Shiitake_Mushroom = 14.3, Dried_Shiitake = 13.585, Dried_Scallop = 0.9, Dried_Fish = 0.2)
+  )
+
+  df$FA_18_4 <- calc_sparse_nutrient(
+c(Mackerel = 3.43)
+  )
+
+  df$FA_20_2 <- calc_sparse_nutrient(
+c(Chicken_Egg = 1.305, Pork = 0.182, Pork_Trotters = 0.06, Grass_Carp = 0.174, Silver_Carp = 0.244,
+  Crucian_Carp = 0.054, Yellow_Croaker = 0.032, Black_Carp = 0.063, Pomfret = 0.07, Bream = 0.059,
+  Rice_Eel = 0.067, Squid = 0.064667, Sea_Shrimp = 2.301, Oyster = 1.7, Razor_Clam = 0.684, Mussel = 0.098,
+  Dried_Fish = 0.1)
+  )
+
+  df$FA_20_3 <- calc_sparse_nutrient(
+c(Century_Egg = 0.09, Grass_Carp = 0.058, Crucian_Carp = 0.108, Perch = 0.464, Yellow_Croaker = 0.032,
+  Black_Carp = 0.315, Spanish_Mackerel = 0.216, Bream = 0.059, Sea_Shrimp = 0.118, Oyster = 0.2,
+  Razor_Clam = 1.767, Fresh_Milk_Boxed_Milk = 0.1, Breakfast_Milk_Breakfast_Drink = 0.1, Dried_Scallop = 1.3)
+  )
+
+  df$FA_20_4 <- calc_sparse_nutrient(
+c(Century_Egg = 1.35, Pork_Floss = 0.3, Ham_Sausage = 0.1, Chicken_Egg = 0.174, Duck_Egg = 1.131,
+  Pork = 0.091, Beef = 0.1, Mutton = 0.4, Rabbit_Meat = 4.9, Chicken = 0.189, Pork_Tripe = 0.48,
+  Pork_Trotters = 0.06, Grass_Carp = 0.348, Crucian_Carp = 0.594, Perch = 1.798, Yellow_Croaker = 0.576,
+  Eel = 0.924, Sardine = 1.273, Black_Carp = 0.63, Mackerel = 0.735, Spanish_Mackerel = 0.972,
+  Pomfret = 0.35, Hairtail = 0.608, Dike_Fish = 2.624, Bream = 1.357, Horse_Mackerel = 1.4, Rice_Eel = 1.005,
+  Squid = 2.780667, Crab = 4.2, Oyster = 1.1, Razor_Clam = 0.228, Mussel = 0.196, Milk_Powder = 0.2,
+  Dried_Fish = 0.2)
+  )
+
+  df$FA_20_5 <- calc_sparse_nutrient(
+c(Mutton = 0.4, Grass_Carp = 0.116, Silver_Carp = 0.305, Crucian_Carp = 0.864, Perch = 3.132,
+  Yellow_Croaker = 0.864, Eel = 2.184, Sardine = 4.489, Mackerel = 3.528, Spanish_Mackerel = 1.836,
+  Pomfret = 0.91, Hairtail = 1.444, Dike_Fish = 3.328, Bream = 0.649, Horse_Mackerel = 2.87,
+  Rice_Eel = 0.201, Squid = 3.427333, Crab = 12.2, Sea_Shrimp = 3.894, Oyster = 10.4, Razor_Clam = 5.814,
+  Mussel = 3.675, Dried_Fish = 9.2)
+  )
+
+  df$FA_22_3 <- calc_sparse_nutrient(
+c(Silver_Carp = 0.732, Crucian_Carp = 0.054, Perch = 0.522, Yellow_Croaker = 0.032, Spanish_Mackerel = 0.612,
+  Pomfret = 0.07, Rice_Eel = 0.335, Oyster = 1.7, Razor_Clam = 1.026, Mussel = 0.098)
+  )
+
+  df$FA_22_4 <- calc_sparse_nutrient(
+c(Chicken_Egg = 0.174, Silver_Carp = 0.61, Crucian_Carp = 0.054, Perch = 3.422, Yellow_Croaker = 0.224,
+  Black_Carp = 0.189, Pomfret = 0.14, Hairtail = 0.456, Rice_Eel = 0.067, Sea_Shrimp = 1.298, Oyster = 4.3,
+  Razor_Clam = 2.28, Mussel = 0.049, Mung_Bean_Sprouts = 7, Dried_Fish = 0.5)
+  )
+
+  df$FA_22_5 <- calc_sparse_nutrient(
+c(Grass_Carp = 0.058, Crucian_Carp = 0.216, Perch = 0.522, Yellow_Croaker = 0.192, Eel = 1.932,
+  Sardine = 0.871, Black_Carp = 0.126, Mackerel = 0.539, Spanish_Mackerel = 0.216, Pomfret = 0.91,
+  Hairtail = 0.76, Dike_Fish = 1.792, Bream = 0.059, Horse_Mackerel = 0.7, Rice_Eel = 0.335,
+  Sea_Shrimp = 0.059, Oyster = 1.5, Razor_Clam = 1.083, Mussel = 0.245, Dried_Fish = 2.1)
+  )
+
+  df$FA_22_6 <- calc_sparse_nutrient(
+c(Grass_Carp = 0.348, Crucian_Carp = 0.594, Perch = 2.378, Yellow_Croaker = 1.632, Eel = 5.208,
+  Sardine = 6.633, Black_Carp = 0.693, Mackerel = 5.586, Spanish_Mackerel = 7.596, Pomfret = 0.56,
+  Hairtail = 4.028, Dike_Fish = 8.896, Bream = 0.708, Horse_Mackerel = 5.39, Rice_Eel = 0.536, Squid = 12.61,
+  Crab = 11.4, Sea_Shrimp = 2.36, Oyster = 3.8, Razor_Clam = 2.679, Mussel = 2.45, Jellyfish = 0.7,
+  Dried_Fish = 22.7)
+  )
+
+  df$fatty_acid_unknown_pct <- calc_sparse_nutrient(
+c(Deep_fried_dough_sticks = 1.5, Salted_Duck_Egg = 0.084, Pork_Floss = 0.5, Ham_Sausage = 0.7,
+  Chicken_Egg = 0.696, Duck_Egg = 2.784, Pork = 1.638, Pork_Chops = 0.2415, Beef = 0.3, Rabbit_Meat = 0.5,
+  Duck = 0.204, Pork_Tripe = 0.96, Pork_Liver = 0.2, Pork_Trotters = 1.62, Pork_Blood = 3.7,
+  Chicken_Wings = 0.138, Grass_Carp = 5.8, Silver_Carp = 6.039, Crucian_Carp = 1.404, Perch = 3.422,
+  Yellow_Croaker = 1.92, Eel = 3.108, Sardine = 6.097, Black_Carp = 9.576, Spanish_Mackerel = 7.308,
+  Pomfret = 4.13, Hairtail = 3.876, Mandarin_Fish = 3.05, Dike_Fish = 2.176, Bream = 5.9,
+  Horse_Mackerel = 3.71, Rice_Eel = 5.092, Crab = 6.8, Sea_Shrimp = 3.481, Oyster = 6.3, Razor_Clam = 2.622,
+  Mussel = 0.882, Jellyfish = 2.1, Fresh_Milk_Boxed_Milk = 3, Milk_Powder = 4.4, Yogurt = 0.7,
+  Soy_Milk = 0.1, Breakfast_Milk_Breakfast_Drink = 3.5, Peanuts = 0.371, Dried_Scallop = 2.9,
+  Dried_Fish = 6.9)
+  )
+
+  df$guanine <- calc_sparse_nutrient(
+c(Instant_Noodles = 18.6, White_Steamed_Bread = 14.5, Oatmeal = 29.5, Bread = 24.6, Oil_Cake = 14.5,
+  Deep_fried_dough_sticks = 9.4, Fried_Cake = 10, Baked_Cake = 13, Sweet_Potato = 6.149, Taro = 6.1,
+  Potato = 5.64, Bean_Paste = 38.6, Chicken_Egg = 1.044, Pork = 18.109, Beef = 15.9,
+  Mutton = 22.9, Rabbit_Meat = 29.2, Pork_Tripe = 133.344, Pork_Liver = 134, Pork_Blood = 10.5,
+  Grass_Carp = 25.143, Silver_Carp = 15.006, Crucian_Carp = 27.135, Yellow_Croaker = 8.448, Sardine = 10.921,
+  Mackerel = 103.586, Spanish_Mackerel = 89.604, Squid = 7.275, Oyster = 75.9, Razor_Clam = 14.6775,
+  Mussel = 91.875, Jellyfish = 3.7, Fresh_Milk_Boxed_Milk = 0.2, Yogurt = 0.833333, Peanuts = 16.536,
+  Other_Nuts = 15.012723, Soybeans = 95.45, Mung_Beans = 88.9, Soybean_Milk = 17.266667, Tofu = 54.4,
+  Dried_Tofu = 54.4, Soybean_Sprouts = 18.2, Mung_Bean_Sprouts = 5.3, Green_Beans = 20.928,
+  String_Beans = 10.56, Carrot = 6.24, White_Radish = 3.3725, Lotus_Root = 2.376, Bamboo_Shoots = 3.213,
+  Cauliflower = 10.168, Chinese_Cabbage = 5.518, Spinach = 2.492, Chinese_Broccoli = 6.37, Rapeseed = 7.008,
+  Lettuce = 4.512, Winter_Melon = 0.24, Cucumber = 4.232, Luffa = 4.067, Bitter_Melon = 3.159,
+  Pumpkin = 7.055, Tomato = 5.2, Eggplant = 5.7, Wood_Ear_Mushroom = 43.6, Enoki_Mushroom = 15.9,
+  Shiitake_Mushroom = 102.766667, Apple = 0.425, Banana = 2.24, Peach = 5.073, Pineapple = 1.564,
+  Lychee = 8.906, Watermelon = 1.829, Dragon_Fruit = 3.381, Dried_Shiitake = 97.628333,
+  Dried_Seaweed = 170.1, Dried_Scallop = 37.4, Dried_Fish = 68.3)
+  )
+
+  df$adenine <- calc_sparse_nutrient(
+c(Instant_Noodles = 16.8, White_Steamed_Bread = 12.5, Oatmeal = 28.4, Bread = 22.9, Oil_Cake = 12.4,
+  Deep_fried_dough_sticks = 10, Fried_Cake = 10.2, Baked_Cake = 13.4, Sweet_Potato = 8.514, Taro = 6.7,
+  Potato = 5.922, Century_Egg = 0.27, Bean_Paste = 33.1, Chicken_Egg = 0.087, Pork = 20.384, Beef = 21.55, Mutton = 24.2, Rabbit_Meat = 46.9, Pork_Tripe = 94.656,
+  Pork_Liver = 89.8, Pork_Blood = 19.6, Grass_Carp = 15.196, Silver_Carp = 26.535, Crucian_Carp = 30.159,
+  Yellow_Croaker = 63.232, Sardine = 7.638, Mackerel = 12.887, Spanish_Mackerel = 21.6, Squid = 12.416,
+  Oyster = 70.25, Razor_Clam = 42.237, Mussel = 59.829, Jellyfish = 3.5, Fresh_Milk_Boxed_Milk = 0.5,
+  Yogurt = 0.966667, Peanuts = 19.981, Other_Nuts = 17.152835, Soybeans = 103.95, Mung_Beans = 102.5,
+  Soybean_Milk = 12.6, Tofu = 38.7, Dried_Tofu = 38.7, Soybean_Sprouts = 9.6, Mung_Bean_Sprouts = 3.8,
+  Green_Beans = 15.456, String_Beans = 9.696, Carrot = 5.472, White_Radish = 3.2775, Lotus_Root = 4.796,
+  Bamboo_Shoots = 3.276, Cauliflower = 10.824, Chinese_Cabbage = 3.916, Spinach = 1.246,
+  Chinese_Broccoli = 7.448, Rapeseed = 7.488, Lettuce = 4.7, Winter_Melon = 0.24, Cucumber = 4.232,
+  Luffa = 4.897, Bitter_Melon = 3.402, Pumpkin = 12.835, Tomato = 8.9, Eggplant = 3.8,
+  Wood_Ear_Mushroom = 51.4, Enoki_Mushroom = 36.4, Shiitake_Mushroom = 153.666667, Apple = 0.34,
+  Banana = 2.17, Peach = 4.094, Pineapple = 1.768, Lychee = 4.672, Watermelon = 1.298, Dragon_Fruit = 3.933,
+  Dried_Shiitake = 145.983333, Dried_Seaweed = 196.8, Dried_Scallop = 124.7, Dried_Fish = 33.7)
+  )
+
+  df$hypoxanthine <- calc_sparse_nutrient(
+c(Instant_Noodles = 0.2, White_Steamed_Bread = 0.3, Oatmeal = 0.8, Bread = 0.75, Fried_Cake = 0.4,
+  Baked_Cake = 0.1, Sweet_Potato = 0.172, Taro = 0.9, Potato = 0.188, Century_Egg = 0.18, Bean_Paste = 2.8,
+  Chicken_Egg = 0.087, Pork = 86.45, Beef = 72.7, Mutton = 53.9, Rabbit_Meat = 69.5,
+  Pork_Tripe = 10.08, Pork_Liver = 18.7, Pork_Blood = 10, Grass_Carp = 44.66, Silver_Carp = 44.408,
+  Crucian_Carp = 34.911, Yellow_Croaker = 33.152, Sardine = 36.515, Mackerel = 29.743,
+  Spanish_Mackerel = 127.944, Squid = 190.314, Oyster = 70.4, Razor_Clam = 40.185, Mussel = 44.884,
+  Jellyfish = 1.2, Fresh_Milk_Boxed_Milk = 0.05, Yogurt = 0.5, Peanuts = 0.053, Other_Nuts = 1.298973,
+  Soybeans = 0.5, Mung_Beans = 0.5, Soybean_Milk = 1.5, Tofu = 0.3, Dried_Tofu = 0.3, Soybean_Sprouts = 0.4,
+  Mung_Bean_Sprouts = 0.3, Green_Beans = 0.192, String_Beans = 0.096, Carrot = 1.728, White_Radish = 1.33,
+  Lotus_Root = 0.088, Bamboo_Shoots = 0.819, Cauliflower = 2.542, Chinese_Cabbage = 1.958, Spinach = 2.047,
+  Chinese_Broccoli = 0.98, Rapeseed = 0.384, Lettuce = 2.538, Winter_Melon = 0.08, Cucumber = 1.564,
+  Luffa = 1.66, Bitter_Melon = 1.053, Pumpkin = 0.51, Tomato = 1.9, Eggplant = 1.33, Wood_Ear_Mushroom = 4.3,
+  Enoki_Mushroom = 5.4, Shiitake_Mushroom = 5.333333, Apple = 0.34, Banana = 0.28, Peach = 2.314,
+  Pineapple = 0.204, Lychee = 0.949, Watermelon = 0.236, Dragon_Fruit = 0.069, Dried_Shiitake = 5.066667,
+  Dried_Seaweed = 47.7, Dried_Scallop = 72, Dried_Fish = 69.7)
+  )
+
+  df$xanthine <- calc_sparse_nutrient(
+c(White_Steamed_Bread = 0.1, Bread = 2, Oil_Cake = 0.1, Deep_fried_dough_sticks = 0.1, Baked_Cake = 0.2,
+  Sweet_Potato = 3.526, Taro = 1.8, Potato = 0.47, Bean_Paste = 2.7, Pork = 0.546,
+  Beef = 5.85, Mutton = 8.1, Rabbit_Meat = 2.8, Pork_Tripe = 3.84, Pork_Liver = 32.7, Pork_Blood = 0.1,
+  Grass_Carp = 1.015, Silver_Carp = 0.244, Crucian_Carp = 0.837, Yellow_Croaker = 0.896, Sardine = 0.134,
+  Spanish_Mackerel = 0.684, Squid = 27.063, Oyster = 0.75, Razor_Clam = 0.3705, Mussel = 6.027,
+  Jellyfish = 1, Yogurt = 0.666667, Peanuts = 8.745, Other_Nuts = 3.822388, Soybeans = 2.2, Mung_Beans = 3.8,
+  Soybean_Milk = 0.883333, Tofu = 0.4, Dried_Tofu = 0.4, Soybean_Sprouts = 0.5, Mung_Bean_Sprouts = 1.7,
+  Green_Beans = 1.632, String_Beans = 2.016, Carrot = 2.88, White_Radish = 1.6625, Lotus_Root = 1.716,
+  Bamboo_Shoots = 1.134, Cauliflower = 10.086, Chinese_Cabbage = 1.068, Spinach = 1.246,
+  Chinese_Broccoli = 3.822, Rapeseed = 1.056, Lettuce = 3.854, Winter_Melon = 0.32, Cucumber = 0.184,
+  Luffa = 1.245, Bitter_Melon = 2.187, Pumpkin = 4.675, Tomato = 0.9, Eggplant = 1.9,
+  Wood_Ear_Mushroom = 2.8, Enoki_Mushroom = 0.9, Shiitake_Mushroom = 4.433333, Peach = 0.534,
+  Pineapple = 4.284, Lychee = 0.219, Watermelon = 0.118, Dragon_Fruit = 1.242, Dried_Shiitake = 4.211667,
+  Dried_Seaweed = 0.7, Dried_Scallop = 0.8, Dried_Fish = 6.85)
+  )
+
+  df$purine_total <- calc_sparse_nutrient(
+c(Instant_Noodles = 36, White_Steamed_Bread = 27, Oatmeal = 59, Bread = 50.5, Oil_Cake = 27,
+  Deep_fried_dough_sticks = 19, Fried_Cake = 21, Baked_Cake = 27, Sweet_Potato = 18.49, Taro = 15,
+  Potato = 12.22, Century_Egg = 0.9, Bean_Paste = 77, Chicken_Egg = 0.87, Pork = 125.58,
+  Beef = 116, Mutton = 109, Rabbit_Meat = 148, Pork_Tripe = 241.92, Pork_Liver = 275, Pork_Blood = 40,
+  Grass_Carp = 85.84, Silver_Carp = 86.01, Crucian_Carp = 92.88, Yellow_Croaker = 105.6, Sardine = 54.94,
+  Mackerel = 146.02, Spanish_Mackerel = 239.76, Squid = 236.68, Oyster = 217.5, Razor_Clam = 97.47,
+  Mussel = 202.86, Jellyfish = 9, Fresh_Milk_Boxed_Milk = 1, Yogurt = 3, Peanuts = 45.05,
+  Other_Nuts = 37.265625, Soybeans = 202, Mung_Beans = 196, Soybean_Milk = 32.166667, Tofu = 94,
+  Dried_Tofu = 94, Soybean_Sprouts = 29, Mung_Bean_Sprouts = 11, Green_Beans = 38.4, String_Beans = 22.08,
+  Carrot = 16.32, White_Radish = 9.5, Lotus_Root = 8.8, Bamboo_Shoots = 8.19, Cauliflower = 33.62,
+  Chinese_Cabbage = 12.46, Spinach = 7.12, Chinese_Broccoli = 18.62, Rapeseed = 16.32, Lettuce = 15.04,
+  Winter_Melon = 0.8, Cucumber = 10.12, Luffa = 11.62, Bitter_Melon = 9.72, Pumpkin = 24.65, Tomato = 17,
+  Eggplant = 12.35, Wood_Ear_Mushroom = 102, Enoki_Mushroom = 59, Shiitake_Mushroom = 266.333333,
+  Apple = 0.85, Banana = 4.9, Peach = 12.46, Pineapple = 7.48, Lychee = 14.6, Watermelon = 3.54,
+  Dragon_Fruit = 8.97, Dried_Shiitake = 253.016667, Dried_Seaweed = 415, Dried_Scallop = 235,
+  Dried_Fish = 178.5)
+  )
   return(df)
 }

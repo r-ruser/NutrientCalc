@@ -26,8 +26,8 @@
 # 方法 1: 从本地文件夹安装 (推荐)
 install.packages("C:/path/to/NutrientCalc", repos = NULL, type = "source")
 
-# 方法 2: 使用 remotes (如果网络和依赖环境允许)
-remotes::install_github("r-ruser/NutrientCalc")
+# 方法 2: 使用 devtools (如果网络和依赖环境允许)
+# devtools::install("C:/path/to/NutrientCalc")
 ```
 
 ## 使用示例
