@@ -1,0 +1,8 @@
+export(calculate_nutrients)
+export(plot_nutrients)
+export(split_nutrients)
+importFrom(readxl, read_excel)
+importFrom(dplyr, recode, mutate, select, everything)
+importFrom(tidyr, pivot_longer)
+importFrom(ggplot2, ggplot, aes, geom_boxplot, scale_y_log10, theme_bw, theme, labs, element_text)
+importFrom(magrittr, "%>%")
